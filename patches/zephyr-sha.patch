@@ -1,0 +1,24 @@
+diff --git a/drivers/crypto/crypto_esp32_sha.c b/drivers/crypto/crypto_esp32_sha.c
+index 9d509a6f451..0158ea3fb6d 100644
+--- a/drivers/crypto/crypto_esp32_sha.c
++++ b/drivers/crypto/crypto_esp32_sha.c
+@@ -356,7 +356,7 @@ static int sha_query_hw_caps(const struct device *dev)
+ {
+ 	ARG_UNUSED(dev);
+ 
+-	return (CAP_SEPARATE_IO_BUFS | CAP_SYNC_OPS);
++	return (CAP_RAW_KEY | CAP_SEPARATE_IO_BUFS | CAP_SYNC_OPS);
+ }
+ 
+ static int sha_handler(struct hash_ctx *hctx, struct hash_pkt *pkt, bool fin)
+@@ -408,7 +408,9 @@ static int sha_handler(struct hash_ctx *hctx, struct hash_pkt *pkt, bool fin)
+ 	if (!fin) {
+ #if SOC_SHA_SUPPORT_RESUME
+ 		sha_hal_wait_idle();
+-		sha_hal_read_digest(s->params.hal_mode, s->H);
++		if (s->total_len >= s->params.block_bytes) {
++		    sha_hal_read_digest(s->params.hal_mode, s->H);
++		}
+ #endif
+ 		goto unlock;
+ 	}

@@ -1,0 +1,11 @@
+# For using together with openocd.sh
+# A stock lldb from a Debian host should be enough
+# Run as lldb -s scripts/lldbinit
+
+# To set a breakpoint:
+# breakpoint set --hardware -f main.c -l 123
+
+target create "build/zephyr/zephyr.elf"
+platform select remote-gdb-server
+process connect connect://localhost:3333
+process plugin packet monitor reset halt

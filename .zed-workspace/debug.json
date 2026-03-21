@@ -1,0 +1,14 @@
+[
+    {
+        "label": "Debug vole",
+        "adapter": "CodeLLDB",
+        "request": "launch",
+        "program": "vole/build/zephyr/zephyr.elf",
+        "initCommands": [
+            "target create \"vole/build/zephyr/zephyr.elf\"",
+            "platform select remote-gdb-server",
+            "process connect connect://localhost:3333"
+        ],
+        "cwd": "vole"
+    }
+]

@@ -1,0 +1,52 @@
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+    chosen {
+        zephyr,console = &usb_serial;
+		zephyr,shell-uart = &usb_serial;
+    };
+	wifi_ap: wifi_ap {
+		compatible = "espressif,esp32-wifi";
+		status = "okay";
+	};
+	/* TODO
+	cdc_ncm_eth0: cdc_ncm_eth0 {
+		compatible = "zephyr,cdc-ncm-ethernet";
+		remote-mac-address = "00005E005301";
+	};
+	*/
+	aliases {
+		led-wan = &led0;
+		led-tun = &led1;
+		btn-reset = &btn_reset;
+	};
+	buttons {
+		compatible = "gpio-keys";
+		debounce-interval-ms = <20>;
+		btn_reset: btn_reset {
+			gpios = <&gpio0 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
+			label = "User LED 15";
+		};
+		led1: led_1 {
+			gpios = <&gpio0 16 GPIO_ACTIVE_HIGH>;
+			label = "User LED 16";
+		};
+	};
+};
+
+&usb_serial {
+    status = "okay";
+};
+
+/* TODO
+&psram0 {
+	size = <DT_SIZE_M(2)>;
+};
+*/

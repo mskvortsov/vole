@@ -1,0 +1,57 @@
+name: Tun
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - "main"
+    paths:
+      - west.yml
+      - tun/**
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    container: debian:12
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends \
+            clang lld llvm cmake ninja-build libmnl-dev libseccomp-dev \
+            python3 python3-pip git ca-certificates
+
+      - name: Checkout vole
+        uses: actions/checkout@v6
+        with:
+          path: vole
+
+      - name: Fetch wolfssl and tomlc17
+        run: |
+          pip install west --break-system-packages
+          west init -l vole
+          west update --fetch-opt=--depth=1 wolfssl tomlc17
+
+      - name: Build tun (${{ matrix.arch }})
+        run: sh vole/scripts/make-tun.sh
+
+      - name: Upload (${{ matrix.arch }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: tun-linux-${{ matrix.arch }}
+          path: build-tun/tun
+          if-no-files-found: error

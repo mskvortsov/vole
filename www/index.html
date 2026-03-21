@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Vole</title>
+        <link rel="icon" href="data:," />
+        <link rel="stylesheet" href="style.css" />
+        <script type="module" src="main.js"></script>
+    </head>
+    <body>
+        <div class="container">
+            <div class="section-name">STATUS</div>
+            <table class="status-table" id="status-table">
+                <tbody></tbody>
+            </table>
+            <div class="section-name">CONFIGURATION</div>
+            <textarea
+                id="config-textarea"
+                rows="20"
+                maxlength="2047"
+                spellcheck="false"
+                disabled
+            ></textarea>
+            <div class="button-row">
+                <div id="feedback-text"></div>
+                <button id="submit-button" disabled>Save and Reload</button>
+            </div>
+        </div>
+    </body>
+</html>

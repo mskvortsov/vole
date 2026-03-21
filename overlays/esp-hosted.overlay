@@ -1,0 +1,12 @@
+&spi2 {
+	clock-frequency = <DT_FREQ_M(5)>;
+	esp_hosted@0 {
+		status = "okay";
+		compatible = "espressif,esp-hosted";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(5)>;
+		reset-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		handshake-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		dataready-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+	};
+};

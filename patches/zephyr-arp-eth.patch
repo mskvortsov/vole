@@ -1,0 +1,216 @@
+diff --git a/subsys/net/ip/ipv4_acd.c b/subsys/net/ip/ipv4_acd.c
+index 9f8827cc46e..3e36f835780 100644
+--- a/subsys/net/ip/ipv4_acd.c
++++ b/subsys/net/ip/ipv4_acd.c
+@@ -90,7 +90,7 @@ static struct net_pkt *ipv4_acd_prepare_arp(struct net_if *iface,
+ 	net_pkt_set_family(pkt, NET_AF_INET);
+ 	net_pkt_set_ipv4_acd(pkt, true);
+ 
+-	ret = net_arp_prepare(pkt, target_ip, sender_ip, &arp);
++	ret = net_arp_prepare(pkt, target_ip, sender_ip, &arp, NULL);
+ 	if (ret == NET_ARP_PKT_REPLACED) {
+ 		pkt = arp;
+ 	} else if (ret < 0)  {
+diff --git a/subsys/net/l2/ethernet/arp.c b/subsys/net/l2/ethernet/arp.c
+index 12cb9c4629c..22c1a87a3ed 100644
+--- a/subsys/net/l2/ethernet/arp.c
++++ b/subsys/net/l2/ethernet/arp.c
+@@ -374,7 +374,8 @@ static inline struct net_pkt *arp_prepare(struct net_if *iface,
+ int net_arp_prepare(struct net_pkt *pkt,
+ 		    struct net_in_addr *request_ip,
+ 		    struct net_in_addr *current_ip,
+-		    struct net_pkt **arp_pkt)
++		    struct net_pkt **arp_pkt,
++		    struct net_in_addr *arp_target)
+ {
+ 	bool is_ipv4_ll_used = false;
+ 	struct arp_entry *entry;
+@@ -385,6 +386,9 @@ int net_arp_prepare(struct net_pkt *pkt,
+ 	}
+ 
+ 	if (net_pkt_ipv4_acd(pkt)) {
++		if (arp_target) {
++			net_ipv4_addr_copy_raw(arp_target->s4_addr, request_ip->s4_addr);
++		}
+ 		*arp_pkt = arp_prepare(net_pkt_iface(pkt), request_ip, NULL,
+ 				       pkt, current_ip);
+ 		return *arp_pkt ? NET_ARP_PKT_REPLACED : -ENOMEM;
+@@ -404,6 +408,9 @@ int net_arp_prepare(struct net_pkt *pkt,
+ 
+ 		if (ipv4) {
+ 			addr = &ipv4->gw;
++			if (arp_target) {
++				net_ipv4_addr_copy_raw(arp_target->s4_addr, addr->s4_addr);
++			}
+ 			if (net_ipv4_is_addr_unspecified(addr)) {
+ 				NET_ERR("Gateway not set for iface %d, could not "
+ 					"send ARP request for %s",
+@@ -419,6 +426,10 @@ int net_arp_prepare(struct net_pkt *pkt,
+ 		addr = request_ip;
+ 	}
+ 
++	if (arp_target) {
++		net_ipv4_addr_copy_raw(arp_target->s4_addr, addr->s4_addr);
++	}
++
+ 	k_mutex_lock(&arp_mutex, K_FOREVER);
+ 
+ 	/* If the destination address is already known, we do not need
+@@ -991,6 +1002,9 @@ int net_arp_clear_pending(struct net_if *iface, struct net_in_addr *dst)
+ 
+ 	arp_entry_cleanup(entry, true);
+ 
++	sys_slist_find_and_remove(&arp_pending_entries, &entry->node);
++	sys_slist_append(&arp_free_entries, &entry->node);
++
+ 	return 0;
+ }
+ 
+diff --git a/subsys/net/l2/ethernet/arp.h b/subsys/net/l2/ethernet/arp.h
+index ef6bbfee39e..5c58bcff3a0 100644
+--- a/subsys/net/l2/ethernet/arp.h
++++ b/subsys/net/l2/ethernet/arp.h
+@@ -66,7 +66,8 @@ struct net_arp_hdr {
+ int net_arp_prepare(struct net_pkt *pkt,
+ 			struct net_in_addr *request_ip,
+ 			struct net_in_addr *current_ip,
+-			struct net_pkt **arp_pkt);
++			struct net_pkt **arp_pkt,
++			struct net_in_addr *arp_target);
+ enum net_verdict net_arp_input(struct net_pkt *pkt,
+ 			       struct net_eth_addr *src,
+ 			       struct net_eth_addr *dst);
+@@ -95,7 +96,7 @@ void net_arp_update(struct net_if *iface, struct net_in_addr *src,
+ 
+ 
+ #else /* CONFIG_NET_ARP */
+-#define net_arp_prepare(_kt, _u1, _u2, _arp) NET_ARP_COMPLETE
++#define net_arp_prepare(_kt, _u1, _u2, _arp, _tgt) NET_ARP_COMPLETE
+ #define net_arp_input(...) NET_OK
+ #define net_arp_clear_cache(...)
+ #define net_arp_foreach(...) 0
+diff --git a/subsys/net/l2/ethernet/ethernet.c b/subsys/net/l2/ethernet/ethernet.c
+index 108c21c88fc..fd35fe2cd91 100644
+--- a/subsys/net/l2/ethernet/ethernet.c
++++ b/subsys/net/l2/ethernet/ethernet.c
+@@ -488,7 +488,8 @@ static bool ethernet_fill_in_dst_on_ipv4_mcast(struct net_pkt *pkt,
+ 
+ static int ethernet_ll_prepare_on_ipv4(struct net_if *iface,
+ 				       struct net_pkt *pkt,
+-				       struct net_pkt **out)
++				       struct net_pkt **out,
++				       struct net_in_addr *arp_target)
+ {
+ 	struct ethernet_context *ctx = net_if_l2_data(iface);
+ 
+@@ -505,8 +506,8 @@ static int ethernet_ll_prepare_on_ipv4(struct net_if *iface,
+ 	}
+ 
+ 	if (IS_ENABLED(CONFIG_NET_ARP)) {
+-		return net_arp_prepare(pkt,
+-				       (struct net_in_addr *)NET_IPV4_HDR(pkt)->dst, NULL, out);
++		return net_arp_prepare(pkt, (struct net_in_addr *)NET_IPV4_HDR(pkt)->dst, NULL, out,
++				       arp_target);
+ 	}
+ 
+ 	return NET_ARP_COMPLETE;
+@@ -575,6 +576,7 @@ static struct net_buf *ethernet_fill_header(struct ethernet_context *ctx,
+ 	size_t reserve_ll_header;
+ 	size_t hdr_len;
+ 	bool is_vlan;
++	struct net_eth_addr eth_dst;
+ 
+ 	is_vlan = IS_ENABLED(CONFIG_NET_VLAN) &&
+ 		net_eth_is_vlan_enabled(ctx, iface) &&
+@@ -583,6 +585,20 @@ static struct net_buf *ethernet_fill_header(struct ethernet_context *ctx,
+ 		orig_iface = net_eth_get_vlan_iface(iface, net_pkt_vlan_tag(pkt));
+ 	}
+ 
++	/* Resolve the Ethernet destination MAC before net_buf_push() shifts
++	 * pkt->frags->data away from the IP header.  The multicast helpers use
++	 * NET_IPV6/4_HDR(pkt) which reads pkt->frags->data directly; once the
++	 * push moves that pointer the wrong bytes are inspected and the
++	 * multicast-MAC mapping silently falls through to the lladdr fallback.
++	 */
++	if (ptype != net_htons(NET_ETH_PTYPE_ARP) &&
++	    (ethernet_fill_in_dst_on_ipv4_mcast(pkt, &eth_dst) ||
++	     ethernet_fill_in_dst_on_ipv6_mcast(pkt, &eth_dst))) {
++		/* eth_dst populated by the multicast helper */
++	} else {
++		memcpy(&eth_dst, net_pkt_lladdr_dst(pkt)->addr, sizeof(eth_dst));
++	}
++
+ 	reserve_ll_header = get_reserve_ll_header_size(orig_iface);
+ 	if (reserve_ll_header > 0) {
+ 		hdr_len = reserve_ll_header;
+@@ -613,12 +629,7 @@ static struct net_buf *ethernet_fill_header(struct ethernet_context *ctx,
+ 
+ 		hdr_vlan = (struct net_eth_vlan_hdr *)(hdr_frag->data);
+ 
+-		if (ptype == net_htons(NET_ETH_PTYPE_ARP) ||
+-		    (!ethernet_fill_in_dst_on_ipv4_mcast(pkt, &hdr_vlan->dst) &&
+-		     !ethernet_fill_in_dst_on_ipv6_mcast(pkt, &hdr_vlan->dst))) {
+-			memcpy(&hdr_vlan->dst, net_pkt_lladdr_dst(pkt)->addr,
+-			       sizeof(struct net_eth_addr));
+-		}
++		memcpy(&hdr_vlan->dst, &eth_dst, sizeof(struct net_eth_addr));
+ 
+ 		memcpy(&hdr_vlan->src, net_pkt_lladdr_src(pkt)->addr,
+ 		       sizeof(struct net_eth_addr));
+@@ -639,12 +650,7 @@ static struct net_buf *ethernet_fill_header(struct ethernet_context *ctx,
+ 			net_buf_add(hdr_frag, hdr_len);
+ 		}
+ 
+-		if (ptype == net_htons(NET_ETH_PTYPE_ARP) ||
+-		    (!ethernet_fill_in_dst_on_ipv4_mcast(pkt, &hdr->dst) &&
+-		     !ethernet_fill_in_dst_on_ipv6_mcast(pkt, &hdr->dst))) {
+-			memcpy(&hdr->dst, net_pkt_lladdr_dst(pkt)->addr,
+-			       sizeof(struct net_eth_addr));
+-		}
++		memcpy(&hdr->dst, &eth_dst, sizeof(struct net_eth_addr));
+ 
+ 		memcpy(&hdr->src, net_pkt_lladdr_src(pkt)->addr,
+ 		       sizeof(struct net_eth_addr));
+@@ -686,6 +692,8 @@ static int ethernet_send(struct net_if *iface, struct net_pkt *pkt)
+ 	struct ethernet_context *ctx = net_if_l2_data(iface);
+ 	uint16_t ptype = net_htons(net_pkt_ll_proto_type(pkt));
+ 	struct net_pkt *orig_pkt = pkt;
++	struct net_in_addr arp_target = {0};
++	bool arp_pkt_replaced = false;
+ 	int ret;
+ 
+ 	if (!api) {
+@@ -711,7 +719,7 @@ static int ethernet_send(struct net_if *iface, struct net_pkt *pkt)
+ 		if (!net_pkt_ipv4_acd(pkt)) {
+ 			struct net_pkt *arp;
+ 
+-			ret = ethernet_ll_prepare_on_ipv4(iface, pkt, &arp);
++			ret = ethernet_ll_prepare_on_ipv4(iface, pkt, &arp, &arp_target);
+ 			if (ret == NET_ARP_COMPLETE) {
+ 				/* ARP resolution complete, packet ready to send */
+ 				NET_DBG("Found ARP entry, sending pkt %p to iface %d (%p)",
+@@ -725,6 +733,7 @@ static int ethernet_send(struct net_if *iface, struct net_pkt *pkt)
+ 				net_pkt_unref(pkt);
+ 				pkt = arp;
+ 				ptype = net_htons(net_pkt_ll_proto_type(pkt));
++				arp_pkt_replaced = true;
+ 			} else if (ret == NET_ARP_PKT_QUEUED) {
+ 				/* Original pkt got queued, pending resolution
+ 				 * of an ongoing ARP request.
+@@ -792,14 +801,13 @@ error:
+ 	return ret;
+ 
+ arp_error:
+-	if (IS_ENABLED(CONFIG_NET_ARP) && ptype == net_htons(NET_ETH_PTYPE_ARP)) {
++	if (IS_ENABLED(CONFIG_NET_ARP) && arp_pkt_replaced) {
+ 		/* Original packet was added to ARP's pending Q, so, to avoid it
+ 		 * being freed, take a reference, the reference is dropped when we
+ 		 * clear the pending Q in ARP and then it will be freed by net_if.
+ 		 */
+ 		net_pkt_ref(orig_pkt);
+-		if (net_arp_clear_pending(
+-			    iface, (struct net_in_addr *)NET_IPV4_HDR(pkt)->dst)) {
++		if (net_arp_clear_pending(iface, &arp_target)) {
+ 			NET_DBG("Could not find pending ARP entry");
+ 		}
+ 		/* Free the ARP request */

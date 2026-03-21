@@ -1,0 +1,18 @@
+---
+BasedOnStyle: LLVM
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+ColumnLimit: 100
+IndentWidth: 4
+PointerAlignment: Right
+IndentCaseLabels: false
+InsertBraces: true
+InsertNewlineAtEOF: true
+SpaceBeforeParens: ControlStatementsExceptControlMacros
+SortIncludes: Never
+IndentGotoLabels: false
+BreakBeforeBraces: Linux

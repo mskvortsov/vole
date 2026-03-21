@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - --target=bpf
+    - -D__TARGET_ARCH_x86
+    - -I/usr/include
+    - -I/usr/include/x86_64-linux-gnu
+  Compiler: clang

@@ -1,0 +1,25 @@
+# default configuration
+[lan]
+ssid = "vole"
+psk = "volevole"
+address6 = "fdf7:0fa8:ed0c:0::1/64"
+dns6 = [ "2606:4700:4700::64", "2001:4860:4860::64" ]
+
+# [wan]
+# ssid = "name"
+# psk = "key"
+# http = false
+
+# [tun]
+# mtu = 1420
+# endpoint = "192.0.2.1:12345"
+# local_port = 54321
+# address4 = "10.0.0.2/30"
+# peer4 = "10.0.0.1"
+# address6 = "fdf7:fa8:ed0c:ffff::2/64"
+# peer6 = "fdf7:fa8:ed0c:ffff::1"
+# cipher_suite = "tls13-aes128-ccm-8-sha256"
+# cipher_suite = "tls13-chacha20-poly1305-sha256"
+# cipher_suite = "tls13-sha256-sha256"
+# psk = "AAAAAAAAAAAAAAAAAAAAAA=="
+# keepalive = 15

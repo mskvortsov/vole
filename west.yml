@@ -1,0 +1,24 @@
+manifest:
+  projects:
+    - name: zephyr
+      url: https://github.com/zephyrproject-rtos/zephyr
+      revision: 5741b6176ba3f4b99e80ed8fb1db0a4d96a2ea8d
+      import:
+        file: west.yml
+        name-allowlist:
+          - zephyr
+          - hal_espressif
+          - mbedtls
+          - picolibc
+
+    - name: wolfssl
+      url: https://github.com/wolfSSL/wolfssl
+      revision: v5.9.0-stable
+
+    - name: tomlc17
+      url: https://github.com/cktan/tomlc17
+      revision: R260302
+
+    - name: cryptogams
+      url: https://github.com/dot-asm/cryptogams
+      revision: 680f98c1765a7cb89c193db169ed048599f92186

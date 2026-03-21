@@ -1,0 +1,8 @@
+role = "client"
+proto = "tls13-chacha20-poly1305-sha256"
+endpoint = "127.0.0.1:12345"
+tun = "dtls2"
+mtu = 1380
+address = "10.8.0.2/30"
+psk = "AAAAAAAAAAAAAAAAAAAAAA=="
+verbosity = 0

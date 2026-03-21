@@ -1,0 +1,24 @@
+diff --git a/subsys/net/ip/net_tc.c b/subsys/net/ip/net_tc.c
+index 9bd69ca3964..1cb8a3e1618 100644
+--- a/subsys/net/ip/net_tc.c
++++ b/subsys/net/ip/net_tc.c
+@@ -73,6 +73,9 @@ enum net_verdict net_tc_try_submit_to_tx_queue(uint8_t tc, struct net_pkt *pkt,
+ 	}
+ #endif
+ 
++	extern void aqm_backlog(size_t);
++	aqm_backlog(net_pkt_get_len(pkt));
++
+ 	k_fifo_put(&tx_classes[tc].fifo, pkt);
+ 	return NET_OK;
+ #else
+@@ -295,7 +298,8 @@ static void tc_tx_handler(void *p1, void *p2, void *p3)
+ 	struct net_pkt *pkt;
+ 
+ 	while (1) {
+-		pkt = k_fifo_get(fifo, K_FOREVER);
++		extern struct net_pkt *aqm_dequeue(struct k_fifo *);
++		pkt = aqm_dequeue(fifo);
+ 		if (pkt == NULL) {
+ 			continue;
+ 		}

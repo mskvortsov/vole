@@ -1,0 +1,55 @@
+#ifndef _WOLFSSL_SETTINGS_H_
+#define _WOLFSSL_SETTINGS_H_
+
+#define SINGLE_THREADED
+#define WC_NO_ASYNC_THREADING
+
+#define NO_ASN
+#define NO_CERTS
+#define WOLFSSL_NO_TLS12
+
+#define NO_FILESYSTEM
+#define NO_DSA
+#define NO_RC4
+#define NO_MD4
+#define NO_MD5
+#define NO_RSA
+#define NO_DES3
+#define NO_SHA
+#define NO_SHA512
+#define NO_ECC_SECP
+#define NO_DH
+#define NO_WOLFSSL_SERVER
+#define NO_SESSION_CACHE
+#define NO_OLD_TLS
+#define NO_WRITEV
+
+#define WOLFSSL_TLS13
+#define WOLFSSL_DTLS
+#define WOLFSSL_DTLS13
+#define WOLFSSL_SEND_HRR_COOKIE
+#define WOLFSSL_USER_IO
+#define WOLFSSL_AES_128
+
+#define WOLFSSL_NO_ASM
+#define WOLFSSL_NO_ASYNC_IO
+#define WOLFSSL_NO_SOCK
+
+#define WOLF_CRYPTO_CB
+#define WOLF_CRYPTO_CB_FREE
+#define WOLFSSL_NO_HASH_RAW
+#define WOLFSSL_SMALL_STACK
+
+#define HAVE_HKDF
+#define HAVE_TLS_EXTENSIONS
+#define HAVE_SUPPORTED_CURVES
+#define HAVE_CURVE25519
+#define CURVE25519_SMALL
+#define HAVE_CHACHA
+#define HAVE_POLY1305
+#define HAVE_AESCCM
+#define HAVE_NULL_CIPHER
+
+#define WOLFSSL_MAX_MTU 1472
+
+#endif

@@ -1,0 +1,30 @@
+/ {
+    chosen {
+        zephyr,code-partition = &code_partition;
+    };
+};
+
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+/delete-node/ &slot0_lpcore_partition;
+/delete-node/ &slot1_lpcore_partition;
+/delete-node/ &storage_partition;
+/delete-node/ &scratch_partition;
+/delete-node/ &coredump_partition;
+
+&flash0 {
+    partitions {
+        code_partition: partition@100000 {
+            label = "image";
+            reg = <0x100000 0x180000>;
+        };
+        coredump_partition: partition@280000 {
+            label = "coredump";
+            reg = <0x280000 0x100000>;
+        };
+        storage_partition: partition@3b0000 {
+            label = "storage";
+            reg = <0x3b0000 0x30000>;
+        };
+    };
+};

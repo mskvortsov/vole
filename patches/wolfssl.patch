@@ -1,0 +1,26 @@
+diff --git a/src/internal.c b/src/internal.c
+index 0ffe6c51f..d31254600 100644
+--- a/src/internal.c
++++ b/src/internal.c
+@@ -10789,7 +10789,7 @@ static void AddRecordHeader(byte* output, word32 length, byte type,
+ #if !defined(WOLFSSL_NO_TLS12) || (defined(HAVE_SESSION_TICKET) && \
+     !defined(NO_WOLFSSL_SERVER)) || \
+     defined(HAVE_CERTIFICATE_STATUS_REQUEST) || \
+-    defined(HAVE_CERTIFICATE_STATUS_REQUEST_V2) || !defined(NO_CERTS)
++    defined(HAVE_CERTIFICATE_STATUS_REQUEST_V2) || !defined(NO_CERTS) || defined(WOLFSSL_DTLS)
+ /* add handshake header for message */
+ static void AddHandShakeHeader(byte* output, word32 length,
+                                word32 fragOffset, word32 fragLength,
+diff --git a/wolfcrypt/src/wc_port.c b/wolfcrypt/src/wc_port.c
+index b0f8c07aa..839b7421b 100644
+--- a/wolfcrypt/src/wc_port.c
++++ b/wolfcrypt/src/wc_port.c
+@@ -4000,7 +4000,7 @@ time_t z_time(time_t * timer)
+ 
+     /* Fallback to uptime since boot. This works for relative times, but
+      * not for ASN.1 date validation */
+-    if (clock_gettime(CLOCK_REALTIME, &ts) == 0)
++    if (sys_clock_gettime(CLOCK_REALTIME, &ts) == 0)
+         if (timer != NULL)
+             *timer = ts.tv_sec;
+ 

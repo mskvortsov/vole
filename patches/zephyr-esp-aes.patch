@@ -1,0 +1,326 @@
+diff --git a/drivers/crypto/crypto_esp32_aes.c b/drivers/crypto/crypto_esp32_aes.c
+index 42f83f93ae2..8268a5ca80f 100644
+--- a/drivers/crypto/crypto_esp32_aes.c
++++ b/drivers/crypto/crypto_esp32_aes.c
+@@ -11,9 +11,11 @@
+ #include <zephyr/crypto/cipher.h>
+ #include <zephyr/drivers/clock_control.h>
+ #include <zephyr/sys/byteorder.h>
++#include <zephyr/sys/util.h>
+ #include <string.h>
+ #include <errno.h>
+ #include <stdlib.h>
++#include <stdint.h>
+ 
+ #include "hal/aes_hal.h"
+ #include "hal/aes_ll.h"
+@@ -29,6 +31,9 @@ LOG_MODULE_REGISTER(esp32_aes, CONFIG_CRYPTO_LOG_LEVEL);
+ #define ESP_AES_DECRYPT 1
+ #endif
+ 
++#define AES_BLOCK_SIZE 16U
++#define CCM_TAG_LEN_BYTES 8U
++
+ struct esp_aes_config {
+ 	const struct device *clock_dev;
+ 	const clock_control_subsys_t clock_subsys;
+@@ -124,7 +129,7 @@ static int aes_begin_session(const struct device *dev, struct cipher_ctx *zctx,
+ 	}
+ 
+ 	if (!(mode == CRYPTO_CIPHER_MODE_ECB || mode == CRYPTO_CIPHER_MODE_CBC ||
+-	      mode == CRYPTO_CIPHER_MODE_CTR)) {
++	      mode == CRYPTO_CIPHER_MODE_CTR || mode == CRYPTO_CIPHER_MODE_CCM)) {
+ 		LOG_ERR("Unsupported mode: %d", mode);
+ 		return -ENOTSUP;
+ 	}
+@@ -396,6 +401,274 @@ static int aes_ctr_op(struct cipher_ctx *zctx, struct cipher_pkt *pkt, uint8_t *
+ 	return 0;
+ }
+ 
++static void ccm_mac_block(uint8_t state[AES_BLOCK_SIZE], const uint8_t block[AES_BLOCK_SIZE])
++{
++	uint8_t x[AES_BLOCK_SIZE];
++
++	cbc_xor_block(state, block, x);
++	aes_ecb_block(x, state);
++}
++
++static int ccm_build_b0(uint8_t *b0, const uint8_t *nonce, size_t nonce_len,
++			size_t msg_len, uint32_t ad_len, uint16_t tag_len)
++{
++	uint8_t l_size;
++	uint64_t max_len;
++
++	if (nonce_len < 7U || nonce_len > 13U) {
++		LOG_ERR("Invalid CCM nonce length: %zu", nonce_len);
++		return -EINVAL;
++	}
++
++	if (tag_len != CCM_TAG_LEN_BYTES) {
++		LOG_ERR("Invalid CCM tag length: %u", tag_len);
++		return -ENOTSUP;
++	}
++
++	l_size = AES_BLOCK_SIZE - 1U - nonce_len;
++	if (l_size < 2U || l_size > 8U) {
++		LOG_ERR("Invalid CCM length field size: %u", l_size);
++		return -EINVAL;
++	}
++
++	max_len = (l_size == 8U) ? UINT64_MAX : ((1ULL << (l_size * 8U)) - 1U);
++	if (msg_len > max_len) {
++		LOG_ERR("CCM msg length too large: %zu", msg_len);
++		return -EINVAL;
++	}
++
++	memset(b0, 0, AES_BLOCK_SIZE);
++	b0[0] = (ad_len ? 0x40U : 0U) | ((uint8_t)((tag_len - 2U) / 2U) << 3) | (l_size - 1U);
++	memcpy(&b0[1], nonce, nonce_len);
++
++	for (uint8_t i = 0; i < l_size; i++) {
++		b0[AES_BLOCK_SIZE - 1U - i] = (uint8_t)(msg_len >> (8U * i));
++	}
++
++	return 0;
++}
++
++static int ccm_cbc_mac(const uint8_t *nonce, size_t nonce_len,
++		       const uint8_t *ad, uint32_t ad_len, const uint8_t *msg, size_t msg_len,
++		       uint16_t tag_len, uint8_t out_tag[AES_BLOCK_SIZE])
++{
++	uint8_t state[AES_BLOCK_SIZE] = {0};
++	uint8_t block[AES_BLOCK_SIZE];
++	size_t offset;
++	int rc;
++
++	rc = ccm_build_b0(block, nonce, nonce_len, msg_len, ad_len, tag_len);
++	if (rc) {
++		return rc;
++	}
++
++	ccm_mac_block(state, block);
++
++	if (ad_len > 0U) {
++		size_t hdr_len;
++
++		memset(block, 0, AES_BLOCK_SIZE);
++		if (ad_len < 0xFF00U) {
++			block[0] = (uint8_t)(ad_len >> 8);
++			block[1] = (uint8_t)(ad_len);
++			hdr_len = 2U;
++		} else {
++			block[0] = 0xFF;
++			block[1] = 0xFE;
++			block[2] = (uint8_t)(ad_len >> 24);
++			block[3] = (uint8_t)(ad_len >> 16);
++			block[4] = (uint8_t)(ad_len >> 8);
++			block[5] = (uint8_t)(ad_len);
++			hdr_len = 6U;
++		}
++
++		if (!ad) {
++			return -EINVAL;
++		}
++
++		offset = MIN(ad_len, AES_BLOCK_SIZE - hdr_len);
++		memcpy(&block[hdr_len], ad, offset);
++		ccm_mac_block(state, block);
++
++		while (offset < ad_len) {
++			size_t chunk = MIN(ad_len - offset, AES_BLOCK_SIZE);
++
++			memset(block, 0, AES_BLOCK_SIZE);
++			memcpy(block, ad + offset, chunk);
++			ccm_mac_block(state, block);
++			offset += chunk;
++		}
++	}
++
++	if (msg_len > 0U && !msg) {
++		return -EINVAL;
++	}
++
++	offset = 0U;
++	while (offset + AES_BLOCK_SIZE <= msg_len) {
++		memcpy(block, msg + offset, AES_BLOCK_SIZE);
++		ccm_mac_block(state, block);
++		offset += AES_BLOCK_SIZE;
++	}
++
++	if (offset < msg_len) {
++		size_t rem = msg_len - offset;
++
++		memset(block, 0, AES_BLOCK_SIZE);
++		memcpy(block, msg + offset, rem);
++		ccm_mac_block(state, block);
++	}
++
++	memcpy(out_tag, state, AES_BLOCK_SIZE);
++
++	return 0;
++}
++
++static void ccm_ctr_inc(uint8_t ctr[AES_BLOCK_SIZE], size_t l_size)
++{
++	for (int i = AES_BLOCK_SIZE - 1; i >= (int)(AES_BLOCK_SIZE - l_size); i--) {
++		if (++ctr[i] != 0U) {
++			break;
++		}
++	}
++}
++
++static void ccm_ctr_crypt(const uint8_t *in, uint8_t *out, size_t len,
++			  uint8_t ctr[AES_BLOCK_SIZE], size_t l_size)
++{
++	while (len > 0U) {
++		uint8_t ks[AES_BLOCK_SIZE];
++		size_t chunk = (len < AES_BLOCK_SIZE) ? len : AES_BLOCK_SIZE;
++
++		aes_ecb_block(ctr, ks);
++
++		for (size_t i = 0; i < chunk; i++) {
++			out[i] = in[i] ^ ks[i];
++		}
++
++		ccm_ctr_inc(ctr, l_size);
++		in += chunk;
++		out += chunk;
++		len -= chunk;
++	}
++}
++
++static int aes_ccm_op(struct cipher_ctx *zctx, struct cipher_aead_pkt *pkt, uint8_t *nonce)
++{
++	struct esp_aes_ctx *ctx = zctx->drv_sessn_state;
++	struct esp_aes_dev_data *data = zctx->device->data;
++	struct cipher_pkt *data_pkt = pkt->pkt;
++	uint16_t tag_len = zctx->mode_params.ccm_info.tag_len;
++	uint16_t nonce_len = zctx->mode_params.ccm_info.nonce_len;
++	uint8_t mac[AES_BLOCK_SIZE];
++	uint8_t ctr0[AES_BLOCK_SIZE];
++	uint8_t ctr1[AES_BLOCK_SIZE];
++	uint8_t s0[AES_BLOCK_SIZE];
++	uint8_t b0_tmp[AES_BLOCK_SIZE];
++	size_t l_size;
++	int restore_dir = 0;
++	int rc;
++
++	if (!ctx || !data_pkt || !nonce || !pkt->tag) {
++		return -EINVAL;
++	}
++
++	if (data_pkt->in_len < 0) {
++		return -EINVAL;
++	}
++
++	if (data_pkt->in_len > 0 && data_pkt->in_buf == NULL) {
++		return -EINVAL;
++	}
++
++	if (data_pkt->out_buf == NULL) {
++		return -EINVAL;
++	}
++
++	if (data_pkt->out_buf_max < data_pkt->in_len) {
++		LOG_ERR("Output buffer too small");
++		return -EINVAL;
++	}
++
++	rc = ccm_build_b0(b0_tmp, nonce, nonce_len, (size_t)data_pkt->in_len,
++			  pkt->ad_len, tag_len);
++	if (rc) {
++		return rc;
++	}
++
++	l_size = AES_BLOCK_SIZE - 1U - nonce_len;
++
++	memset(ctr0, 0, AES_BLOCK_SIZE);
++	ctr0[0] = (uint8_t)(l_size - 1U);
++	memcpy(&ctr0[1], nonce, nonce_len);
++
++	memcpy(ctr1, ctr0, AES_BLOCK_SIZE);
++	ctr1[AES_BLOCK_SIZE - 1] = 1U;
++
++	k_mutex_lock(&data->aes_lock, K_FOREVER);
++
++	if (ctx->dir != ESP_AES_ENCRYPT) {
++		rc = aes_setkey_dir(ctx->key, ctx->key_len, ESP_AES_ENCRYPT);
++		if (rc) {
++			k_mutex_unlock(&data->aes_lock);
++			return rc;
++		}
++		restore_dir = 1;
++	}
++
++	if (ctx->dir == ESP_AES_ENCRYPT) {
++		rc = ccm_cbc_mac(nonce, nonce_len, pkt->ad, pkt->ad_len,
++				 data_pkt->in_buf, (size_t)data_pkt->in_len, tag_len, mac);
++		if (rc) {
++			goto out_restore;
++		}
++
++		if (data_pkt->in_len > 0) {
++			ccm_ctr_crypt(data_pkt->in_buf, data_pkt->out_buf,
++				      (size_t)data_pkt->in_len, ctr1, l_size);
++		}
++
++		aes_ecb_block(ctr0, s0);
++		for (uint16_t i = 0; i < tag_len; i++) {
++			pkt->tag[i] = mac[i] ^ s0[i];
++		}
++		data_pkt->out_len = data_pkt->in_len;
++	} else {
++		if (data_pkt->in_len > 0) {
++			ccm_ctr_crypt(data_pkt->in_buf, data_pkt->out_buf,
++				      (size_t)data_pkt->in_len, ctr1, l_size);
++		}
++		data_pkt->out_len = data_pkt->in_len;
++
++		rc = ccm_cbc_mac(nonce, nonce_len, pkt->ad, pkt->ad_len,
++				 data_pkt->out_buf, (size_t)data_pkt->out_len, tag_len, mac);
++		if (rc) {
++			goto out_restore;
++		}
++
++		aes_ecb_block(ctr0, s0);
++		for (uint16_t i = 0; i < tag_len; i++) {
++			mac[i] ^= s0[i];
++		}
++
++		if (memcmp(mac, pkt->tag, tag_len) != 0) {
++			memset(data_pkt->out_buf, 0, data_pkt->out_len);
++			rc = -EINVAL;
++			goto out_restore;
++		}
++		rc = 0;
++	}
++
++out_restore:
++	if (restore_dir) {
++		aes_setkey_dir(ctx->key, ctx->key_len, ctx->dir);
++	}
++
++	k_mutex_unlock(&data->aes_lock);
++
++	return rc;
++}
++
+ static int aes_cipher_begin_session(const struct device *dev, struct cipher_ctx *ctx,
+ 				    enum cipher_algo algo, enum cipher_mode mode,
+ 				    enum cipher_op optype)
+@@ -416,10 +689,15 @@ static int aes_cipher_begin_session(const struct device *dev, struct cipher_ctx
+ 	case CRYPTO_CIPHER_MODE_CTR:
+ 		ctx->ops.ctr_crypt_hndlr = aes_ctr_op;
+ 		break;
++	case CRYPTO_CIPHER_MODE_CCM:
++		ctx->ops.ccm_crypt_hndlr = aes_ccm_op;
++		break;
+ 	default:
+ 		break;
+ 	}
+ 
++	ctx->ops.cipher_mode = mode;
++
+ 	return 0;
+ }
+ 

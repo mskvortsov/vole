@@ -1,0 +1,124 @@
+diff --git a/subsys/net/lib/dns/mdns_responder.c b/subsys/net/lib/dns/mdns_responder.c
+index 47b444b9d19..e9d35a361a1 100644
+--- a/subsys/net/lib/dns/mdns_responder.c
++++ b/subsys/net/lib/dns/mdns_responder.c
+@@ -181,6 +181,22 @@ static void mdns_iface_event_handler(struct net_mgmt_event_callback *cb,
+ 			}
+ 		}
+ #endif /* defined(CONFIG_NET_IPV4) */
++#if defined(CONFIG_NET_IPV6)
++		if (net_if_flag_is_set(iface, NET_IF_IPV6)) {
++			struct net_in6_addr mcast_addr;
++			int ret;
++
++			/* ff02::fb — mDNS IPv6 multicast group */
++			net_ipv6_addr_create(&mcast_addr,
++					     0xff02, 0, 0, 0, 0, 0, 0, 0x00fb);
++			ret = net_ipv6_mld_join(iface, &mcast_addr);
++			if (ret < 0 && ret != -EALREADY) {
++				NET_DBG("Cannot add IPv6 multicast address %s to iface %d (%d)",
++					net_sprint_ipv6_addr(&mcast_addr),
++					net_if_get_by_iface(iface), ret);
++			}
++		}
++#endif /* defined(CONFIG_NET_IPV6) */
+ 	}
+ 
+ #if defined(CONFIG_MDNS_RESPONDER_PROBE)
+@@ -409,9 +425,9 @@ static int send_response(int sock,
+ 			 struct net_sockaddr *src_addr,
+ 			 size_t addrlen,
+ 			 struct net_buf *query,
+-			 enum dns_rr_type qtype)
++			 enum dns_rr_type qtype,
++			 struct net_if *iface)
+ {
+-	struct net_if *iface;
+ 	net_socklen_t dst_len;
+ 	int ret;
+ 	COND_CODE_1(IS_ENABLED(CONFIG_NET_IPV6),
+@@ -424,10 +440,14 @@ static int send_response(int sock,
+ 		return ret;
+ 	}
+ 
+-	if (family == NET_AF_INET6) {
+-		iface = net_if_ipv6_select_src_iface(&net_sin6(src_addr)->sin6_addr);
+-	} else {
+-		iface = net_if_ipv4_select_src_iface(&net_sin(src_addr)->sin_addr);
++	if (iface == NULL) {
++		if (family == NET_AF_INET6) {
++			iface = net_if_ipv6_select_src_iface(
++					&net_sin6(src_addr)->sin6_addr);
++		} else {
++			iface = net_if_ipv4_select_src_iface(
++					&net_sin(src_addr)->sin_addr);
++		}
+ 	}
+ 
+ 	if ((qtype == DNS_RR_TYPE_A && !IS_ENABLED(CONFIG_NET_IPV4)) ||
+@@ -619,7 +639,8 @@ static int dns_read(int sock,
+ 		    struct net_buf *dns_data,
+ 		    size_t len,
+ 		    struct net_sockaddr *src_addr,
+-		    size_t addrlen)
++		    size_t addrlen,
++		    struct net_if *iface)
+ {
+ 	/* Helper struct to track the dns msg received from the server */
+ 	const char *hostname = net_hostname_get();
+@@ -687,16 +708,22 @@ static int dns_read(int sock,
+ 
+ 		/* If the query matches to our hostname, then send reply.
+ 		 * We skip the first dot, and make sure there is dot after
+-		 * matching hostname.
++		 * matching hostname. Also match www.<hostname>.local since
++		 * some browsers (e.g. Safari on iOS) prepend "www." when no
++		 * scheme is typed.
+ 		 */
+-		if (!strncasecmp(hostname, result->data, hostname_len) &&
+-		    (result->len) >= hostname_len &&
+-		    &result->data[hostname_len] == lquery) {
++		if ((!strncasecmp(hostname, result->data, hostname_len) &&
++		     (result->len) >= hostname_len &&
++		     &result->data[hostname_len] == lquery) ||
++		    (!strncasecmp("www.", result->data, 4) &&
++		     !strncasecmp(hostname, result->data + 4, hostname_len) &&
++		     (result->len) >= hostname_len + 4 &&
++		     &result->data[hostname_len + 4] == lquery)) {
+ 			NET_DBG("%s %s %s to our hostname %s%s", "mDNS",
+ 				family == NET_AF_INET ? "IPv4" : "IPv6", "query",
+ 				hostname, ".local");
+ 			send_response(sock, family, src_addr, addrlen,
+-				      result, qtype);
++				      result, qtype, iface);
+ 		} else if (IS_ENABLED(CONFIG_MDNS_RESPONDER_DNS_SD)
+ 			&& qtype == DNS_RR_TYPE_PTR) {
+ 			send_sd_response(sock, family, src_addr, addrlen,
+@@ -1263,9 +1290,10 @@ static int dispatcher_cb(struct dns_socket_dispatcher *ctx, int sock,
+ 			 struct net_sockaddr *addr, size_t addrlen,
+ 			 struct net_buf *dns_data, size_t len)
+ {
++	struct net_if *iface = ctx->mdns_ctx ? ctx->mdns_ctx->iface : NULL;
+ 	int ret;
+ 
+-	ret = dns_read(sock, dns_data, len, addr, addrlen);
++	ret = dns_read(sock, dns_data, len, addr, addrlen, iface);
+ 	if (ret < 0 && ret != -EINVAL && ret != -ENOENT) {
+ 		NET_DBG("%s read failed (%d)", "mDNS", ret);
+ 	}
+@@ -1430,6 +1458,7 @@ static int init_listener(void)
+ 			continue;
+ 		}
+ 
++		v6_ctx[i].iface = iface;
+ 		ifindex = net_if_get_by_iface(iface);
+ 
+ 		ret = net_if_get_name(iface, name, INTERFACE_NAME_LEN);
+@@ -1527,6 +1556,7 @@ static int init_listener(void)
+ 			continue;
+ 		}
+ 
++		v4_ctx[i].iface = iface;
+ 		ifindex = net_if_get_by_iface(iface);
+ 
+ 		ret = net_if_get_name(iface, name, INTERFACE_NAME_LEN);

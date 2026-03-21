@@ -1,0 +1,32 @@
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	wifi_ap: wifi_ap {
+		compatible = "espressif,esp32-wifi";
+		status = "okay";
+	};
+	aliases {
+		led-wan = &led0;
+		led-tun = &led1;
+		btn-reset = &btn_reset;
+	};
+	buttons {
+		compatible = "gpio-keys";
+		debounce-interval-ms = <20>;
+		btn_reset: btn_reset {
+			gpios = <&gpio0 9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+			label = "User LED D4";
+		};
+		led1: led_1 {
+			gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
+			label = "User LED D5";
+		};
+	};
+};

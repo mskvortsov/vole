@@ -1,0 +1,34 @@
+{
+  "lsp": {
+    "clangd": {
+      "binary": {
+        "path": "/usr/bin/clangd",
+        "arguments": ["--background-index", "--query-driver=**/*"]
+      }
+    }
+  },
+  "languages": {
+    "C": {
+      "show_wrap_guides": true,
+      "wrap_guides": [100],
+      "hard_tabs": true,
+      "tab_size": 8
+    },
+    "JSON": {
+      "tab_size": 2
+    },
+    "YAML": {
+      "tab_size": 2
+    },
+    "HTML": {
+      "prettier": {
+        "allowed": true,
+        "parser": "html"
+      }
+    }
+  },
+  "file_types": {
+    "C": ["*.h"],
+    "Kconfig": ["*.conf"]
+  }
+}

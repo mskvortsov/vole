@@ -1,0 +1,102 @@
+name: Firmware
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  setup-cached:
+    runs-on: ubuntu-24.04
+    outputs:
+      cache-key: ${{ steps.key.outputs.key }}
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          path: vole
+
+      - name: Compute cache key
+        id: key
+        run: echo "key=workspace-${{ hashFiles('vole/scripts/setup-dev.sh', 'vole/west.yml') }}" >> $GITHUB_OUTPUT
+
+      - name: Check workspace cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
+  setup:
+    needs: setup-cached
+    if: needs.setup-cached.outputs.cache-hit != 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          path: vole
+
+      - name: Set up west workspace
+        run: vole/scripts/setup-dev.sh ci
+
+      - name: Save workspace cache
+        uses: actions/cache/save@v5
+        with:
+          path: .
+          key: ${{ needs.setup-cached.outputs.cache-key }}
+
+  build:
+    needs: [setup-cached, setup]
+    if: always() && !failure() && !cancelled()
+    name: Build ${{ matrix.board.id }}-${{ matrix.flavor.id }}
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - id: esp32c6
+          - id: esp32c3
+          - id: esp32s3
+
+        flavor:
+          - id: sta
+          - id: apsta
+
+    steps:
+      - name: Restore workspace cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .
+          key: ${{ needs.setup-cached.outputs.cache-key }}
+          fail-on-cache-miss: true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          path: vole
+
+      - name: Apply patches
+        run: |
+          git -C wolfssl apply $GITHUB_WORKSPACE/vole/patches/wolfssl.patch
+          git -C zephyr apply $GITHUB_WORKSPACE/vole/patches/zephyr-*.patch
+
+      - name: Build ${{ matrix.board.id }}-${{ matrix.flavor.id }}
+        run: vole/scripts/make.sh ${{ matrix.flavor.id }} ${{ matrix.board.id }}
+
+      - name: Upload ${{ matrix.board.id }}-${{ matrix.flavor.id }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ matrix.board.id }}-${{ matrix.flavor.id }}
+          path: |
+            build/zephyr/zephyr.bin
+            build/zephyr/zephyr.elf
+          if-no-files-found: error

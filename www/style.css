@@ -1,0 +1,148 @@
+:root {
+    --font-family: 'DejaVu Sans Mono', monospace;
+    --font-size: 12px;
+
+    --bg-color: white;
+    --text-color: black;
+    --caption-color: #404040;
+    --focus-color: #808080;
+    --border-color: #c0c0c0;
+    --tr-odd-bg-color: #f0f0f0;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-color: black;
+        --text-color: white;
+        --caption-color: #a0a0a0;
+        --focus-color: #a0a0a0;
+        --border-color: #303030;
+        --tr-odd-bg-color: #101010;
+    }
+}
+
+/* disable horizontal scroll */
+html,
+body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    font-size: var(--font-size);
+    font-family: var(--font-family);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+}
+
+.container {
+    display: flex;
+    padding: 0px 30px 30px 30px;
+    flex-direction: column;
+    width: 480px;
+    color: var(--text-color);
+}
+
+.section-name {
+    font-weight: bold;
+    text-align: left;
+    color: var(--caption-color);
+    letter-spacing: 1px;
+    margin-top: 40px;
+    margin-bottom: 10px;
+}
+
+.status-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.status-table tr:nth-child(odd of .status-entry) {
+    background-color: var(--tr-odd-bg-color);
+}
+
+.status-table tr.status-group:not(:first-child) td {
+    padding-top: 20px;
+}
+
+.status-table tr.status-group td {
+    border: none;
+    padding-left: 0;
+    text-transform: uppercase;
+}
+
+.status-table td {
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    hyphens: manual;
+    hyphenate-character: '';
+}
+
+.status-table td:first-child {
+    color: var(--caption-color);
+}
+
+.status-table td:last-child {
+    text-align: right;
+    color: var(--text-color);
+}
+
+textarea {
+    font-size: var(--font-size);
+    font-family: var(--font-family);
+
+    line-height: 1.5;
+    padding: 16px;
+    width: 100%;
+    box-sizing: border-box;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    border: 1px dotted var(--border-color);
+
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+
+    tab-size: 2;
+    resize: vertical;
+}
+
+textarea:focus {
+    outline: none;
+    border-color: var(--focus-color);
+}
+
+.button-row {
+    display: flex;
+    align-items: center;
+    margin-top: 20px;
+}
+
+#feedback-text {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 20px;
+}
+
+button {
+    font-size: var(--font-size);
+    font-family: var(--font-family);
+    padding: 10px 20px;
+    opacity: 0.5;
+    cursor: pointer;
+    border: solid 1px;
+    background-color: var(--bg-color);
+    border-color: var(--focus-color);
+    color: var(--text-color);
+}
+
+button:hover {
+    opacity: 1;
+}

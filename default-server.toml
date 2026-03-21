@@ -1,0 +1,9 @@
+role = "server"
+proto = "tls13-chacha20-poly1305-sha256"
+endpoint = "0.0.0.0:12345"
+tun = "dtls0"
+mtu = 1420
+address = "10.0.0.1/30"
+psk = "AAAAAAAAAAAAAAAAAAAAAA=="
+verbosity = 0
+timeout = 60

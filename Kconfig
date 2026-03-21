@@ -1,0 +1,56 @@
+mainmenu "Vole Tunnel"
+
+config VOLE_LAN
+	bool "Enable LAN soft-AP interface (AP+STA router mode)"
+	select ESP32_WIFI_AP_STA_MODE
+	select NET_IPV6
+	select NET_ROUTING
+
+config NET_IF_MAX_IPV4_COUNT
+	default 3 if VOLE_LAN
+	default 2
+
+config NET_IF_MAX_IPV6_COUNT
+	default 3 if VOLE_LAN
+
+config NET_IF_MCAST_IPV6_ADDR_COUNT
+	default 5 if VOLE_LAN
+
+config VOLE_BENCH
+	bool "Run benchmarks at startup"
+	select CONFIG_TIMING_FUNCTIONS
+	default n
+
+menu "Tunnel"
+
+config DTLS_PKT_COUNT
+	int "Packet pool size"
+	default 24
+
+endmenu
+
+menu "Active Queue Management"
+
+config CODEL_TARGET_MS
+	int "Target sojourn time"
+	default 5
+
+config CODEL_INTERVAL_MS
+	int "Interval duration"
+	default 100
+
+endmenu
+
+source "Kconfig.zephyr"
+
+module = DTLS
+module-str = dtls
+source "subsys/logging/Kconfig.template.log_config"
+
+module = NPF
+module-str = npf
+source "subsys/logging/Kconfig.template.log_config"
+
+module = RA
+module-str = ra
+source "subsys/logging/Kconfig.template.log_config"

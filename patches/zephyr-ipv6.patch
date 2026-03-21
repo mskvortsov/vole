@@ -1,0 +1,80 @@
+diff --git a/subsys/net/ip/ipv6_nbr.c b/subsys/net/ip/ipv6_nbr.c
+index 860a02bb54a..ca16d61eda9 100644
+--- a/subsys/net/ip/ipv6_nbr.c
++++ b/subsys/net/ip/ipv6_nbr.c
+@@ -438,11 +438,11 @@ static void ipv6_ns_reply_timeout(struct k_work *work)
+ 			pending = k_fifo_get(&net_ipv6_nbr_data(nbr)->pending_queue,
+ 					     K_FOREVER);
+ 
++			/* Drop the queue ref before re-queueing via prepare/send. */
++			net_pkt_unref(pending);
++
+ 			verdict = net_ipv6_prepare_for_send(pending);
+ 			if (verdict == NET_DROP) {
+-				/* The ref when added to the pending queue */
+-				net_pkt_unref(pending);
+-
+ 				/* To unref the original pkt allocation */
+ 				net_pkt_unref(pending);
+ 
+@@ -450,6 +450,14 @@ static void ipv6_ns_reply_timeout(struct k_work *work)
+ 				continue;
+ 			}
+ 
++			if (verdict == NET_CONTINUE && net_ipv6_nbr_data(nbr)->send_ns == 0) {
++				net_ipv6_nbr_data(nbr)->send_ns = k_uptime_get();
++				if (!k_work_delayable_remaining_get(&ipv6_ns_reply_timer)) {
++					k_work_reschedule(&ipv6_ns_reply_timer,
++							  K_MSEC(NS_REPLY_TIMEOUT));
++				}
++			}
++
+ 			/* Now wait timeout again */
+ 			break;
+ 		}
+@@ -1197,7 +1205,7 @@ int net_ipv6_send_na(struct net_if *iface, const struct net_in6_addr *src,
+ 	/* Let's make sure reserved part is full of 0 */
+ 	memset(na_hdr, 0, sizeof(struct net_icmpv6_na_hdr));
+ 
+-	na_hdr->flags = flags;
++	na_hdr->flags = flags | NET_ICMPV6_NA_FLAG_ROUTER;
+ 	net_ipv6_addr_copy_raw(na_hdr->tgt, (uint8_t *)tgt);
+ 
+ 	if (net_pkt_set_data(pkt, &na_access)) {
+@@ -2138,6 +2146,7 @@ int net_ipv6_send_ns(struct net_if *iface,
+ 
+ 			/* Let the system timeout and then send the NS again */
+ 			net_ipv6_nbr_unlock();
++			net_pkt_unref(pkt);
+ 			return 0;
+ 		}
+ 	}
+diff --git a/subsys/net/ip/net_if.c b/subsys/net/ip/net_if.c
+index a51f1774089..8844b1b28f2 100644
+--- a/subsys/net/ip/net_if.c
++++ b/subsys/net/ip/net_if.c
+@@ -1161,7 +1161,7 @@ static void join_mcast_allnodes(struct net_if *iface)
+ 	struct net_in6_addr addr;
+ 	int ret;
+ 
+-	if (iface->config.ip.ipv6 == NULL) {
++	if (iface->config.ip.ipv6 == NULL || !net_if_flag_is_set(iface, NET_IF_IPV6)) {
+ 		return;
+ 	}
+ 
+diff --git a/subsys/net/ip/route.c b/subsys/net/ip/route.c
+index a303941541d..ad60ee588eb 100644
+--- a/subsys/net/ip/route.c
++++ b/subsys/net/ip/route.c
+@@ -1056,6 +1056,11 @@ static bool is_ll_addr_supported(struct net_if *iface)
+ 		return false;
+ 	}
+ #endif
++#if defined(CONFIG_NET_L2_VIRTUAL)
++	if (net_if_l2(iface) == &NET_L2_GET_NAME(VIRTUAL)) {
++		return false;
++	}
++#endif
+ 
+ 	return true;
+ }

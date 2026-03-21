@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  firmware:
+    uses: ./.github/workflows/firmware.yml
+
+  tun:
+    uses: ./.github/workflows/tun.yml
+
+  release:
+    needs: [firmware, tun]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+
+      - name: Stage release files
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          for board in esp32c6 esp32c3 esp32s3; do
+            cp firmware-$board-apsta/zephyr.bin firmware-$board-$VERSION.bin
+          done
+          cp tun-linux-amd64/tun tun-amd64-$VERSION
+          cp tun-linux-aarch64/tun tun-aarch64-$VERSION
+
+      - name: Create release
+        env:
+          VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $VERSION \
+            firmware-esp32c6-$VERSION.bin \
+            firmware-esp32c3-$VERSION.bin \
+            firmware-esp32s3-$VERSION.bin \
+            tun-amd64-$VERSION \
+            tun-aarch64-$VERSION

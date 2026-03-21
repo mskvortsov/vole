@@ -1,0 +1,117 @@
+diff --git a/drivers/wifi/esp32/src/esp_wifi_drv.c b/drivers/wifi/esp32/src/esp_wifi_drv.c
+index 91941ee09e0..999ebdf1cf2 100644
+--- a/drivers/wifi/esp32/src/esp_wifi_drv.c
++++ b/drivers/wifi/esp32/src/esp_wifi_drv.c
+@@ -93,24 +93,44 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
+ 	}
+ }
+ 
++#define PKT_ALLOC_TIMEOUT K_MSEC(1)
++extern void esp_wifi_rx_cb(struct net_pkt *pkt);
++extern void esp_wifi_tx_cb(struct net_pkt *pkt);
++
+ static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
+ {
+ 	struct esp32_wifi_runtime *data = dev->data;
+-	const int pkt_len = net_pkt_get_len(pkt);
+-	esp_interface_t ifx = data->state == ESP32_AP_CONNECTED ? ESP_IF_WIFI_AP : ESP_IF_WIFI_STA;
++	size_t pkt_len = net_pkt_get_len(pkt);
++	wifi_interface_t ifx = data == &esp32_data ? WIFI_IF_STA : WIFI_IF_AP;
++	int ret;
+ 
+ 	if (data->state != ESP32_STA_CONNECTED && data->state != ESP32_AP_CONNECTED) {
+ 		return -EIO;
+ 	}
+ 
+-	/* Read the packet payload */
+-	if (net_pkt_read(pkt, data->frame_buf, pkt_len) < 0) {
+-		goto out;
++	esp_wifi_tx_cb(pkt);
++
++	void *frame_buf;
++	struct net_buf *buf = pkt->frags;
++	if (buf && !buf->frags) {
++		/* Payload fits into one fragment */
++		frame_buf = buf->data;
++	} else {
++		/* Read the packet payload */
++		ret = net_pkt_read(pkt, data->frame_buf, pkt_len);
++		if (ret < 0) {
++			goto fail;
++		}
++		frame_buf = data->frame_buf;
+ 	}
+ 
+ 	/* Enqueue packet for transmission */
+-	if (esp_wifi_internal_tx(ifx, (void *)data->frame_buf, pkt_len) != ESP_OK) {
+-		goto out;
++	ret = esp_wifi_internal_tx(ifx, frame_buf, pkt_len);
++	if (ret == ESP_ERR_NO_MEM) {
++		return -ENOMEM;
++	}
++	if (ret != ESP_OK) {
++		goto fail;
+ 	}
+ 
+ #if defined(CONFIG_NET_STATISTICS_WIFI)
+@@ -121,9 +141,9 @@ static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
+ 	LOG_DBG("pkt sent %p len %d", pkt, pkt_len);
+ 	return 0;
+ 
+-out:
++fail:
+ 
+-	LOG_ERR("Failed to send packet");
++	LOG_ERR("Failed to send (0x%04x)", ret);
+ #if defined(CONFIG_NET_STATISTICS_WIFI)
+ 	data->stats.errors.tx++;
+ #endif
+@@ -140,7 +160,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
+ 		return -EIO;
+ 	}
+ 
+-	pkt = net_pkt_rx_alloc_with_buffer(esp32_wifi_iface, len, NET_AF_UNSPEC, 0, K_MSEC(100));
++	pkt = net_pkt_rx_alloc_with_buffer(esp32_wifi_iface, len, NET_AF_UNSPEC, 0,
++					   PKT_ALLOC_TIMEOUT);
+ 	if (!pkt) {
+ 		LOG_ERR("Failed to allocate net buffer");
+ 		esp_wifi_internal_free_rx_buffer(eb);
+@@ -152,6 +173,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
+ 		goto pkt_unref;
+ 	}
+ 
++	esp_wifi_rx_cb(pkt);
++
+ 	if (net_recv_data(esp32_wifi_iface, pkt) < 0) {
+ 		LOG_ERR("Failed to push received data");
+ 		goto pkt_unref;
+@@ -188,7 +211,7 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
+ 	}
+ 
+ 	pkt = net_pkt_rx_alloc_with_buffer(esp32_wifi_iface_ap, len,
+-					   NET_AF_UNSPEC, 0, K_MSEC(100));
++					   NET_AF_UNSPEC, 0, PKT_ALLOC_TIMEOUT);
+ 	if (!pkt) {
+ 		esp_wifi_internal_free_rx_buffer(eb);
+ 		LOG_ERR("Failed to get net buffer");
+@@ -200,6 +223,8 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
+ 		goto pkt_unref;
+ 	}
+ 
++	esp_wifi_rx_cb(pkt);
++
+ 	if (net_recv_data(esp32_wifi_iface_ap, pkt) < 0) {
+ 		LOG_ERR("Failed to push received data");
+ 		goto pkt_unref;
+@@ -456,8 +481,10 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
+ 		esp_wifi_handle_ap_connect_event(event_data);
+ 		break;
+ 	case WIFI_EVENT_AP_STADISCONNECTED:
+-		ap_data->state = ESP32_AP_DISCONNECTED;
+ 		esp_wifi_handle_ap_disconnect_event(event_data);
++		if (!esp32_data.ap_connection_cnt) {
++			ap_data->state = ESP32_AP_DISCONNECTED;
++		}
+ 		break;
+ 	default:
+ 		break;
