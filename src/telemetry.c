@@ -110,8 +110,8 @@ static size_t telemetry_sojourn_collect(struct telemetry *telemetry)
 	telemetry->h.tag = TELEMETRY_TAG_SOJOURN;
 
 	for (size_t i = 0; i < SOJOURN_HIST_SIZE; ++i) {
-		telemetry->u.sojourn_hist.lan[i] = atomic_get(&hist_lan[i]);
-		telemetry->u.sojourn_hist.wan[i] = atomic_get(&hist_wan[i]);
+		telemetry->u.sojourn_hist.lan[i] = hist_lan ? atomic_get(&hist_lan[i]) : 0;
+		telemetry->u.sojourn_hist.wan[i] = hist_wan ? atomic_get(&hist_wan[i]) : 0;
 	}
 
 	return sizeof(struct telemetry_header) + sizeof(struct telemetry_sojourn_hist);
