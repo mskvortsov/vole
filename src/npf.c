@@ -22,6 +22,7 @@ LOG_MODULE_REGISTER(npf, CONFIG_NPF_LOG_LEVEL);
 #include "tcp_internal.h"
 
 #include "config.h"
+#include "npf.h"
 
 #define NET_ICMPV4_FRAGMENTATION_REQUIRED   4
 #define NET_ICMPV4_FRAGMENTATION_ORIG_BYTES 64
@@ -278,7 +279,7 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 		return false;
 	}
 	ip_hdr->ttl -= 1;
-	ip_hdr->chksum += htons(0x0100);
+	ip_hdr->chksum = ipv4_chksum_ttl_dec(ip_hdr->chksum);
 	ret = net_pkt_set_data(pkt, &ipv4_access);
 	if (ret != 0) {
 		LOG_ERR("cannot update ipv4 header (%d)", ret);

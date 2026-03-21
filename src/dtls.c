@@ -22,14 +22,12 @@ LOG_MODULE_REGISTER(dtls, CONFIG_DTLS_LOG_LEVEL);
 #include "icmpv4.h"
 #include "net_private.h"
 #include "udp_internal.h"
-#if defined(CONFIG_NET_IPV6)
-#include "npf.h"
-#endif
 
 #include <wolfssl/ssl.h>
 
 #include "dtls.h"
 #include "crypto.h"
+#include "npf.h"
 
 #define PKT_ALLOC_TIMEOUT K_MSEC(1)
 #define BUF_ALLOC_TIMEOUT K_MSEC(1)
@@ -799,7 +797,7 @@ static int dtls_egress(struct dtls_context *ctx, struct net_pkt *pkt)
 		}
 		ip4_hdr->ttl -= 1;
 		/* Update the checksum incrementally as described in RFC 1624. */
-		ip4_hdr->chksum += htons(0x0100);
+		ip4_hdr->chksum = ipv4_chksum_ttl_dec(ip4_hdr->chksum);
 		ret = net_pkt_set_data(pkt, &ipv4_access);
 		if (ret != 0) {
 			LOG_ERR("cannot set ipv4 header (%d)", ret);
