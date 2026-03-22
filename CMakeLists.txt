@@ -44,10 +44,14 @@ if(CONFIG_RISCV)
     )
     target_sources(app PRIVATE ${chacha_S})
     zephyr_ld_options(-Wl,--wrap=wc_Chacha_Process)
-    zephyr_linker_sources(DATA_SECTIONS chacha-riscv-sram.ld)
+    zephyr_linker_sources(DATA_SECTIONS ldscripts/chacha-riscv-sram.ld)
 endif()
 
-zephyr_linker_sources(SECTIONS sections-rom.ld)
+if(CONFIG_SOC_SERIES_ESP32S3)
+    zephyr_linker_sources(DATA_SECTIONS ldscripts/sections-esp32s3-sram2.ld)
+endif()
+
+zephyr_linker_sources(SECTIONS ldscripts/sections-rom.ld)
 zephyr_linker_section(
     NAME http_resource_desc_http_service
     KVMA RAM_REGION GROUP RODATA_REGION)
