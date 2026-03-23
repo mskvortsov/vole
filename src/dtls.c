@@ -1087,20 +1087,6 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt)
 		return -EINVAL;
 	}
 
-#if defined(CONFIG_NET_IPV6)
-	if (net_pkt_family(pkt) == NET_AF_INET6) {
-		NET_PKT_DATA_ACCESS_DEFINE(ipv6_access, struct net_ipv6_hdr);
-		struct net_ipv6_hdr *ip6_hdr = net_pkt_get_data(pkt, &ipv6_access);
-
-		if (ip6_hdr && ip6_hdr->nexthdr == NET_IPPROTO_TCP &&
-		    net_pkt_skip(pkt, sizeof(struct net_ipv6_hdr)) == 0) {
-			clamp_mss(pkt, net_if_get_mtu(iface) -
-				  (sizeof(struct net_ipv6_hdr) + sizeof(struct net_tcp_hdr)));
-		}
-		net_pkt_cursor_init(pkt);
-	}
-#endif
-
 	if (dtls_ingress(ctx, pkt) != 0) {
 		LOG_ERR("ingress error");
 		dtls_close(ctx, true);

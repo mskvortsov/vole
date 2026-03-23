@@ -36,6 +36,7 @@ LOG_MODULE_REGISTER(npf, CONFIG_NPF_LOG_LEVEL);
 #define ICMP_RATE_LIMIT_TIMEOUT     K_SECONDS(1)
 #define ICMP_PKT_ALLOC_TIME         K_MSEC(50)
 
+/* RFC 6691 */
 #define IPV4_TCP_MSS_OVERHEAD (sizeof(struct net_ipv4_hdr) + sizeof(struct net_tcp_hdr))
 #if defined(CONFIG_NET_IPV6)
 #define IPV6_TCP_MSS_OVERHEAD (sizeof(struct net_ipv6_hdr) + sizeof(struct net_tcp_hdr))
@@ -318,19 +319,6 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 		return false;
 	}
 
-	if (ip_hdr->proto == NET_IPPROTO_TCP) {
-		/* Skip any IPv4 options beyond the standard 20-byte header. */
-		uint8_t ip_hlen = (ip_hdr->vhl & 0x0f) * 4;
-		if (ip_hlen > sizeof(struct net_ipv4_hdr)) {
-			ret = net_pkt_skip(pkt, ip_hlen - sizeof(struct net_ipv4_hdr));
-			if (ret != 0) {
-				LOG_ERR("cannot skip ipv4 header options (%d)", ret);
-				return false;
-			}
-		}
-		clamp_mss(pkt, ctx.tun_mtu - IPV4_TCP_MSS_OVERHEAD);
-	}
-
 	/* Packet will be unreferenced on return, but we want to forward it. */
 	net_pkt_ref(pkt);
 
@@ -553,6 +541,7 @@ static bool is_icmp_allowed(struct net_addr *addr)
 
 static bool npf_test_send_fn(struct npf_test *t, struct net_pkt *pkt)
 {
+	uint8_t family = net_pkt_family(pkt);
 	NET_PKT_DATA_ACCESS_DEFINE(ipv4_access, struct net_ipv4_hdr);
 	struct net_ipv4_hdr *ip_hdr;
 #if defined(CONFIG_NET_IPV6)
@@ -567,12 +556,31 @@ static bool npf_test_send_fn(struct npf_test *t, struct net_pkt *pkt)
 		return true;
 	}
 
-	if (net_pkt_get_len(pkt) <= ctx.tun_mtu) {
-		return true;
-	}
-
-	uint8_t family = net_pkt_family(pkt);
 	if (family == NET_AF_INET) {
+		ip_hdr = net_pkt_get_data(pkt, &ipv4_access);
+		if (!ip_hdr) {
+			LOG_ERR("cannot get ipv4 header");
+			return true;
+		}
+
+		if (ip_hdr->proto == NET_IPPROTO_TCP) {
+			/* Skip any IPv4 options beyond the standard 20-byte header. */
+			uint8_t ip_hlen = (ip_hdr->vhl & 0x0f) * 4;
+			if (ip_hlen > sizeof(struct net_ipv4_hdr)) {
+				if (net_pkt_skip(pkt, ip_hlen - sizeof(struct net_ipv4_hdr)) != 0) {
+					LOG_ERR("cannot skip ipv4 header options");
+					return false;
+				}
+			}
+			clamp_mss(pkt, ctx.tun_mtu - IPV4_TCP_MSS_OVERHEAD);
+		}
+
+		net_pkt_cursor_init(pkt);
+
+		if (net_pkt_get_len(pkt) <= ctx.tun_mtu) {
+			return true;
+		}
+
 		ip_hdr = net_pkt_get_data(pkt, &ipv4_access);
 		if (!ip_hdr) {
 			LOG_ERR("cannot get ipv4 header");
@@ -600,6 +608,10 @@ static bool npf_test_send_fn(struct npf_test *t, struct net_pkt *pkt)
 		return false;
 #if defined(CONFIG_NET_IPV6)
 	} else if (family == NET_AF_INET6) {
+		if (net_pkt_get_len(pkt) <= ctx.tun_mtu) {
+			return true;
+		}
+
 		ip6_hdr = net_pkt_get_data(pkt, &ipv6_access);
 		if (!ip6_hdr) {
 			LOG_ERR("cannot get ipv6 header");
