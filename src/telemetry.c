@@ -204,7 +204,7 @@ static void telemetry_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(telemetry_timer, telemetry_timer_handler, NULL);
 
-static int sntp_time(void)
+static int64_t sntp_time(void)
 {
 	struct sntp_ctx ctx = {0};
 	struct sntp_time ts;
@@ -259,10 +259,7 @@ static int sntp_time(void)
 		return ret;
 	}
 
-	telemetry_timestamp_offset =
-		ts.seconds * MSEC_PER_SEC + (((uint64_t)ts.fraction * MSEC_PER_SEC) >> 32);
-
-	return 0;
+	return ts.seconds * MSEC_PER_SEC + (((uint64_t)ts.fraction * MSEC_PER_SEC) >> 32);
 }
 
 static void print_timestamp_offset_iso8601(const struct shell *sh)
@@ -317,15 +314,16 @@ static int cmd_telemetry_start(const struct shell *sh, size_t argc, char **argv)
 			shell_error(sh, "cannot parse the argument (%d)", err);
 			return -EINVAL;
 		}
-		telemetry_timestamp_offset = seconds * MSEC_PER_SEC;
+		telemetry_timestamp_offset = seconds * MSEC_PER_SEC - k_uptime_get();
 	} else {
-		ret = sntp_time();
-		if (ret != 0) {
-			shell_error(sh, "cannot get sntp time from %s (%d)",
-				    TELEMETRY_SNTP_SERVER, ret);
+		int64_t res = sntp_time();
+		if (res < 0) {
+			shell_error(sh, "cannot get sntp time from %s (%lld)",
+				    TELEMETRY_SNTP_SERVER, res);
 			shell_print(sh, "supply an additional seconds argument (unix time)");
 			return -EINVAL;
 		}
+		telemetry_timestamp_offset = res - k_uptime_get();
 	}
 
 	print_timestamp_offset_iso8601(sh);
