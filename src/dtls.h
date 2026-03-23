@@ -5,8 +5,6 @@
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/sys/clock.h>
 
-typedef int (*route_fn)(struct net_pkt *pkt, struct net_ipv4_hdr *ip_hdr);
-
 struct proto {
 	const char *cipher_suite;
 	uint8_t dtls_overhead;
@@ -17,7 +15,6 @@ struct dtls_interface_config {
 	uint16_t local_port; /* Host byte order */
 	const char *psk_base64;
 	size_t keepalive_secs;
-	route_fn route;
 	uint16_t mtu;
 	const char *cipher_suite;
 };

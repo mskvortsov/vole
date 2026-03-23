@@ -66,9 +66,6 @@ struct dtls_context {
 	struct net_context udp_context;
 	struct net_conn_handle *udp_conn_handle;
 
-	/* A sink for egress IPv4 data packets */
-	route_fn route;
-
 	/* Flags */
 	bool init_done;
 	bool status;
@@ -680,11 +677,9 @@ static int dtls_connect(struct dtls_context *ctx)
 static int dtls_egress(struct dtls_context *ctx, struct net_pkt *pkt)
 {
 	NET_PKT_DATA_ACCESS_CONTIGUOUS_DEFINE(ipv4_access, struct net_ipv4_hdr);
-	struct net_ipv4_hdr *ip4_hdr;
-#if defined(CONFIG_NET_IPV6)
 	NET_PKT_DATA_ACCESS_CONTIGUOUS_DEFINE(ipv6_access, struct net_ipv6_hdr);
+	struct net_ipv4_hdr *ip4_hdr;
 	struct net_ipv6_hdr *ip6_hdr;
-#endif
 	struct net_buf *buf;
 	net_time_t rx_timestamp;
 	int ret, err;
@@ -807,13 +802,7 @@ static int dtls_egress(struct dtls_context *ctx, struct net_pkt *pkt)
 
 		net_pkt_set_ll_proto_type(pkt, NET_ETH_PTYPE_IP);
 		net_pkt_set_family(pkt, NET_PF_INET);
-
-		net_pkt_cursor_init(pkt);
-		if (ctx->route(pkt, ip4_hdr) != 0) {
-			net_pkt_unref(pkt);
-		}
-#if defined(CONFIG_NET_IPV6)
-	} else if (version == 6) {
+	} else if (IS_ENABLED(CONFIG_NET_IPV6) && version == 6) {
 		net_pkt_cursor_init(pkt);
 		ip6_hdr = net_pkt_get_data(pkt, &ipv6_access);
 		if (!ip6_hdr) {
@@ -840,16 +829,16 @@ static int dtls_egress(struct dtls_context *ctx, struct net_pkt *pkt)
 
 		net_pkt_set_ll_proto_type(pkt, NET_ETH_PTYPE_IPV6);
 		net_pkt_set_family(pkt, NET_PF_INET6);
-
-		net_pkt_cursor_init(pkt);
-		if (net_recv_data(ctx->iface, pkt) < 0) {
-			net_pkt_unref(pkt);
-		}
-#endif
 	} else {
 #if defined(CONFIG_NET_IPV6)
 		LOG_WRN("unknown inner packet version %u, dropping", version);
 #endif
+		net_pkt_unref(pkt);
+		return 0;
+	}
+
+	net_pkt_cursor_init(pkt);
+	if (net_recv_data(ctx->iface, pkt) < 0) {
 		net_pkt_unref(pkt);
 	}
 
@@ -1210,8 +1199,6 @@ int dtls_set_config(struct net_if *iface, const struct dtls_interface_config *co
 	}
 
 	ctx->keepalive_secs = config->keepalive_secs;
-
-	ctx->route = config->route;
 
 	if (NET_IPV4_MTU <= config->mtu && config->mtu <= DTLS_MTU_MAX) {
 		net_if_set_mtu(iface, config->mtu);

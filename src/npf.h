@@ -8,7 +8,6 @@
 int npf_start(struct net_if *iface_lan, struct net_if *iface_wan, struct net_if *iface_tun);
 int npf_stop(void);
 void clamp_mss(struct net_pkt *pkt, uint16_t max_mss);
-int route_tun(struct net_pkt *pkt, struct net_ipv4_hdr *ip_hdr);
 
 static inline uint16_t ipv4_chksum_ttl_dec(uint16_t chksum_net)
 {

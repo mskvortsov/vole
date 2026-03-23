@@ -131,7 +131,6 @@ static int tun_start(void)
 		.local_port = config.tun.local_port,
 		.psk_base64 = config.tun.psk,
 		.keepalive_secs = config.tun.keepalive_secs,
-		.route = route_tun,
 		.mtu = config.tun.mtu,
 		.cipher_suite = config.tun.cipher_suite,
 	};

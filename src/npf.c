@@ -185,10 +185,47 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 
 	ARG_UNUSED(t);
 
-	if (net_pkt_forwarding(pkt)) {
-		return true;
+	/* First, process IPv4 packets coming from TUN. */
+	if (net_pkt_family(pkt) == NET_AF_INET && iface == ctx.iface_tun) {
+		ip_hdr = net_pkt_get_data(pkt, &ipv4_access);
+		if (!ip_hdr) {
+			LOG_ERR("cannot get ipv4 header");
+			return false;
+		}
+
+		/* Pass input packets destined for the TUN interface address. */
+		if (net_ipv4_addr_cmp_raw(ip_hdr->dst, config.tun.address4.addr.s4_addr)) {
+			LOG_PKT_IPV4("tun input", pkt, ip_hdr);
+			return true;
+		}
+
+		/* Forward source-NAT-ed packets to the WAN interface. */
+		if (net_ipv4_addr_cmp_raw(ip_hdr->src, ctx.wan_address.s4_addr)) {
+			LOG_PKT_IPV4("wan forward", pkt, ip_hdr);
+			net_pkt_set_iface(pkt, ctx.iface_wan);
+			net_pkt_ref(pkt);
+			if (net_try_send_data(pkt, K_NO_WAIT) != 0) {
+				net_pkt_unref(pkt);
+			}
+			return false;
+		}
+
+		/* Forward everything else to the LAN interface. */
+		if (!ctx.iface_lan) {
+			LOG_WRN("no lan iface, dropping packet");
+			return false;
+		}
+		LOG_PKT_IPV4("lan forward", pkt, ip_hdr);
+		net_pkt_set_iface(pkt, ctx.iface_lan);
+		net_pkt_ref(pkt);
+		if (net_try_send_data(pkt, K_NO_WAIT) != 0) {
+			net_pkt_unref(pkt);
+		}
+
+		return false;
 	}
 
+	/* Second, process Ethernet packets coming from LAN and WAN. */
 	if (iface != ctx.iface_lan && iface != ctx.iface_wan) {
 		return true;
 	}
@@ -204,59 +241,54 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 		return true;
 	}
 
-	net_pkt_cursor_backup(pkt, &backup);
-
 	if (eth_hdr->type != net_htons(NET_ETH_PTYPE_IP)) {
 		return true;
 	}
 
+	net_pkt_cursor_backup(pkt, &backup);
+
 	ret = net_pkt_skip(pkt, sizeof(struct net_eth_hdr));
 	if (ret != 0) {
 		LOG_ERR("cannot skip ethernet header");
-		net_pkt_cursor_restore(pkt, &backup);
-		return true;
+		goto pass;
 	}
 
 	ip_hdr = net_pkt_get_data(pkt, &ipv4_access);
 	if (!ip_hdr) {
 		LOG_ERR("cannot get ipv4 header");
-		net_pkt_cursor_restore(pkt, &backup);
-		return true;
+		goto pass;
 	}
 
-	/* Pass DTLS and broadcast/multicast. */
-	if (net_ipv4_addr_cmp_raw(ip_hdr->src, config.tun.endpoint.sin_addr.s4_addr) ||
-	    (ctx.iface_lan && net_ipv4_is_addr_bcast_raw(ctx.iface_lan, ip_hdr->dst)) ||
+	/* Pass packets from outside the WAN subnet. */
+	if (iface == ctx.iface_wan &&
+	    !net_if_ipv4_addr_mask_cmp(ctx.iface_wan, (const struct net_in_addr *)ip_hdr->src)) {
+		goto pass;
+	}
+
+	/* Pass broadcast/multicast. */
+	if ((ctx.iface_lan && net_ipv4_is_addr_bcast_raw(ctx.iface_lan, ip_hdr->dst)) ||
 	    net_ipv4_is_addr_bcast_raw(ctx.iface_wan, ip_hdr->dst) ||
 	    net_ipv4_is_addr_mcast_raw(ip_hdr->dst)) {
-		net_pkt_cursor_restore(pkt, &backup);
-		return true;
+		goto pass;
 	}
 
 	/* WAN reply packets (dst == our WAN IP): pass DHCP and optionally HTTP,
 	 * forward the rest to tunnel. */
 	if (net_ipv4_addr_cmp_raw(ip_hdr->dst, ctx.wan_address.s4_addr)) {
 		uint8_t ip_hlen = (ip_hdr->vhl & 0x0f) * 4;
+		if (net_pkt_skip(pkt, ip_hlen) != 0) {
+			goto pass;
+		}
 
 		if (ip_hdr->proto == NET_IPPROTO_UDP) {
 			NET_PKT_DATA_ACCESS_DEFINE(udp_access, struct net_udp_hdr);
-			struct net_udp_hdr *udp_hdr;
-
-			if (net_pkt_skip(pkt, ip_hlen) != 0) {
-				goto pass;
-			}
-			udp_hdr = net_pkt_get_data(pkt, &udp_access);
+			struct net_udp_hdr *udp_hdr = net_pkt_get_data(pkt, &udp_access);
 			if (!udp_hdr || net_htons(udp_hdr->dst_port) == 68) {
 				goto pass;
 			}
 		} else if (ip_hdr->proto == NET_IPPROTO_TCP && config.wan.http) {
 			NET_PKT_DATA_ACCESS_DEFINE(tcp_access, struct net_tcp_hdr);
-			struct net_tcp_hdr *tcp_hdr;
-
-			if (net_pkt_skip(pkt, ip_hlen) != 0) {
-				goto pass;
-			}
-			tcp_hdr = net_pkt_get_data(pkt, &tcp_access);
+			struct net_tcp_hdr *tcp_hdr = net_pkt_get_data(pkt, &tcp_access);
 			if (!tcp_hdr || net_htons(tcp_hdr->dst_port) == 80) {
 				goto pass;
 			}
@@ -675,32 +707,4 @@ int npf_stop(void)
 
 	ctx.status = false;
 	return 0;
-}
-
-
-int route_tun(struct net_pkt *pkt, struct net_ipv4_hdr *ip_hdr)
-{
-	/* Input packets destined for the TUN interface address. */
-	if (net_ipv4_addr_cmp_raw(ip_hdr->dst, config.tun.address4.addr.s4_addr)) {
-		LOG_PKT_IPV4("tun input", pkt, ip_hdr);
-		net_pkt_set_iface(pkt, ctx.iface_tun);
-		return net_recv_data(ctx.iface_tun, pkt);
-	}
-
-	/* Forward source-NAT-ed packets to the WAN interface. */
-	if (net_ipv4_addr_cmp_raw(ip_hdr->src, ctx.wan_address.s4_addr)) {
-		LOG_PKT_IPV4("wan forward", pkt, ip_hdr);
-		net_pkt_set_iface(pkt, ctx.iface_wan);
-		return net_try_send_data(pkt, K_NO_WAIT);
-	}
-
-	/* Forward everything else to the LAN interface. */
-	if (!ctx.iface_lan) {
-		LOG_WRN("no lan iface, dropping packet");
-		net_pkt_unref(pkt);
-		return 0;
-	}
-	LOG_PKT_IPV4("lan forward", pkt, ip_hdr);
-	net_pkt_set_iface(pkt, ctx.iface_lan);
-	return net_try_send_data(pkt, K_NO_WAIT);
 }
