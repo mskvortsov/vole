@@ -30,6 +30,8 @@
 #include <wolfssl/wolfcrypt/coding.h>
 #include <wolfssl/wolfcrypt/random.h>
 
+#include "version.h"
+
 static const char *client_id = "default";
 static const char udp_hello[] = "hello";
 
@@ -192,7 +194,7 @@ static int create_tun(void)
     memset(&ifr, 0, sizeof(ifr));
 
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    strncpy(ifr.ifr_name, g_config.tun_name, IFNAMSIZ - 1);
+    strncpy(ifr.ifr_name, g_config.tun_name, IFNAMSIZ);
 
     ret = ioctl(tun_fd, TUNSETIFF, (void *)&ifr);
     if (ret < 0) {
@@ -411,6 +413,7 @@ static int seccomp_restrict(void)
     SCMP_ALLOW(getsockopt);
     SCMP_ALLOW(setsockopt);
     SCMP_ALLOW(poll);
+    SCMP_ALLOW(ppoll);
     SCMP_ALLOW(close);
 
     SCMP_ALLOW(sendto);
@@ -1500,7 +1503,8 @@ static void generate_psk(void)
 static void usage(void)
 {
     printf("Usage: tun <conf.toml>\n"
-           "       tun genpsk\n");
+           "       tun genpsk\n"
+           "       tun --version\n");
 }
 
 int main(int argc, char **argv)
@@ -1515,6 +1519,11 @@ int main(int argc, char **argv)
     const char *arg = argv[1];
     if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
         usage();
+        return 0;
+    }
+
+    if (strcmp(arg, "--version") == 0) {
+        printf("tun " TUN_VERSION "\n");
         return 0;
     }
 

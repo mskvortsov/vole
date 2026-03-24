@@ -1,5 +1,6 @@
 CompileFlags:
   CompilationDatabase: ../../build-tun/
+  Add: [-I../../build-tun]
   Remove: -Werror
 Diagnostics:
   UnusedIncludes: None

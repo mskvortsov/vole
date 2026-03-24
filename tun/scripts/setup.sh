@@ -51,7 +51,7 @@ ip -4 route   add $VOLE_WAN_SUBNET dev $TUN_IFACE
 modprobe jool
 
 jool instance add "$JOOL_NAME" --netfilter --pool6 $NAT64_PREFIX
-jool --instance "$JOOL_NAME" instance display
+jool instance display
 
 jool --instance "$JOOL_NAME" pool4 add --tcp  $EXT_IPV4 61000-63000
 jool --instance "$JOOL_NAME" pool4 add --udp  $EXT_IPV4 61000-63000
@@ -64,7 +64,7 @@ nft -f - <<EOF
 create table ip6 vole_lan_masq {
     chain postrouting {
         type nat hook postrouting priority srcnat;
-        oifname $EXT_IFACE ip6 saddr $VOLE_LAN_PREFIX ip6 daddr != $NAT64_PREFIX masquerade
+        oifname $EXT_IFACE ip6 saddr $VOLE_LAN_PREFIX ip6 daddr != $NAT64_PREFIX masquerade;
     }
 }
 EOF
@@ -75,7 +75,7 @@ nft -f - <<EOF
 create table ip vole_wan_snat {
     chain postrouting {
         type nat hook postrouting priority srcnat;
-        oifname $TUN_IFACE ip daddr $VOLE_WAN_SUBNET snat to $VOLE_WAN_IPV4
+        oifname $TUN_IFACE ip daddr $VOLE_WAN_SUBNET snat to $VOLE_WAN_IPV4;
     }
 }
 EOF

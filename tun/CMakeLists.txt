@@ -56,6 +56,23 @@ if(ENABLE_TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" _version_lines)
+foreach(_line ${_version_lines})
+    if(_line MATCHES "^([A-Z_]+) = ([0-9]+)$")
+        set(${CMAKE_MATCH_1} ${CMAKE_MATCH_2})
+    endif()
+endforeach()
+execute_process(
+    COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=12 HEAD
+    OUTPUT_VARIABLE GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT GIT_HASH)
+    set(GIT_HASH "unknown")
+endif()
+configure_file(version.h.in version.h)
+
 add_compile_definitions(WOLFSSL_GETRANDOM WOLFSSL_MAX_MTU=1472 HAVE_NULL_CIPHER)
 
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../wolfssl wolfssl)
@@ -64,6 +81,7 @@ add_library(tomlc17 STATIC ${CMAKE_CURRENT_SOURCE_DIR}/../../tomlc17/src/tomlc17
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../tomlc17/src)
 
 add_executable(tun tun.c)
+target_include_directories(tun PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_options(tun PRIVATE -Wall -Wextra -Wpedantic -Werror)
 set_target_properties(tun PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED ON)
 target_link_libraries(tun PRIVATE tomlc17 ${LIBMNL} ${LIBSECCOMP} wolfssl)

@@ -1,0 +1,33 @@
+[project]
+name = "testbed"
+dynamic = ["version"]
+requires-python = ">=3.12"
+dependencies = [
+    "esptool==5.2",
+]
+
+[project.scripts]
+testbed = "testbed.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "code"
+path = "src/testbed/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/testbed"]
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.ruff.format]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
