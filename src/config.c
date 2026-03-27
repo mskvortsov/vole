@@ -1,5 +1,7 @@
+#include <strings.h>
+
 #include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(config, CONFIG_CONFIG_LOG_LEVEL);
 
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_ip.h>
@@ -26,6 +28,9 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 #define HTTP_CONFIG_REPORT_SIZE  256
 
 struct config config;
+static struct config config_new;
+static bool config_new_pending;
+static struct k_mutex config_lock;
 
 static const uint8_t default_config_toml[] = {
 	#include "default.toml.inc"
@@ -360,6 +365,7 @@ static int config_load_wan(struct config *c, toml_datum_t t)
 
 static int config_load_tun(struct config *c, toml_datum_t t)
 {
+	char proto[12];
 	struct int_result res;
 	int ret;
 	ret = config_load_endpoint(&c->tun.endpoint, t);
@@ -406,21 +412,6 @@ static int config_load_tun(struct config *c, toml_datum_t t)
 		return ret;
 	}
 
-	ret = config_load_string(c->tun.cipher_suite, sizeof(c->tun.cipher_suite), "cipher_suite",
-				 "tun.cipher_suite", t);
-	if (ret != 0) {
-		return ret;
-	}
-	if (!find_cipher_suite(c->tun.cipher_suite)) {
-		REPORT("cannot parse tun.cipher_suite %s: invalid value", c->tun.cipher_suite);
-		return 1;
-	}
-
-	ret = config_load_string(c->tun.psk, sizeof(c->tun.psk), "psk", "tun.psk", t);
-	if (ret != 0) {
-		return ret;
-	}
-
 	res = config_load_int(0, UINT16_MAX, true, KEEPALIVE_SECS_DEFAULT, "keepalive",
 			      "tun.keepalive", t);
 	if (res.ret != 0) {
@@ -433,6 +424,45 @@ static int config_load_tun(struct config *c, toml_datum_t t)
 		return res.ret;
 	}
 	c->tun.mtu = res.val;
+
+	ret = config_load_string(proto, sizeof(proto), "proto", "tun.proto", t);
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (strcasecmp(proto, "dtls") == 0) {
+		c->tun.opts.proto = PROTO_DTLS;
+		ret = config_load_string(c->tun.opts.u.dtls.psk, sizeof(c->tun.opts.u.dtls.psk),
+					 "psk", "tun.psk", t);
+		if (ret != 0) {
+			return ret;
+		}
+		ret = config_load_string(c->tun.opts.u.dtls.cipher_suite,
+					 sizeof(c->tun.opts.u.dtls.cipher_suite), "cipher_suite",
+					 "tun.cipher_suite", t);
+		if (ret != 0) {
+			return ret;
+		}
+		if (!find_cipher_suite(c->tun.opts.u.dtls.cipher_suite)) {
+			REPORT("cannot parse tun.cipher_suite %s: invalid value",
+			       c->tun.opts.u.dtls.cipher_suite);
+			return 1;
+		}
+	} else if (strcasecmp(proto, "wireguard") == 0) {
+		c->tun.opts.proto = PROTO_WIREGUARD;
+		ret = config_load_string(c->tun.opts.u.wg.key, sizeof(c->tun.opts.u.wg.key), "key",
+					 "tun.key", t);
+		if (ret != 0) {
+			return ret;
+		}
+		ret = config_load_string(c->tun.opts.u.wg.pubkey, sizeof(c->tun.opts.u.wg.pubkey),
+					 "pubkey", "tun.pubkey", t);
+		if (ret != 0) {
+			return ret;
+		}
+	} else {
+		c->tun.opts.proto = PROTO_UNKNOWN;
+	}
 
 #if defined(CONFIG_NET_IPV6)
 	toml_datum_t address6 = toml_get(t, "address6");
@@ -547,16 +577,30 @@ static bool config_eq_wan(struct config *l, struct config *r)
 	       l->wan.http == r->wan.http;
 }
 
+static bool config_eq_tun_opts(struct config_tun_options *l, struct config_tun_options *r)
+{
+	if (l->proto != r->proto) {
+		return false;
+	}
+	if (l->proto == PROTO_DTLS) {
+		return strcmp(l->u.dtls.cipher_suite, r->u.dtls.cipher_suite) == 0 &&
+		       strcmp(l->u.dtls.psk, r->u.dtls.psk) == 0;
+	} else if (l->proto == PROTO_WIREGUARD) {
+		return strcmp(l->u.wg.key, r->u.wg.key) == 0 &&
+		       strcmp(l->u.wg.pubkey, r->u.wg.pubkey) == 0;
+	}
+	return false;
+}
+
 static bool config_eq_tun(struct config *l, struct config *r)
 {
 	return memcmp(&l->tun.endpoint, &r->tun.endpoint, sizeof(l->tun.endpoint)) == 0 &&
 	       l->tun.local_port == r->tun.local_port &&
 	       memcmp(&l->tun.address4, &r->tun.address4, sizeof(l->tun.address4)) == 0 &&
 	       memcmp(&l->tun.peer4, &r->tun.peer4, sizeof(l->tun.peer4)) == 0 &&
-	       strcmp(l->tun.psk, r->tun.psk) == 0 &&
 	       l->tun.keepalive_secs == r->tun.keepalive_secs &&
 	       l->tun.mtu == r->tun.mtu &&
-	       strcmp(l->tun.cipher_suite, r->tun.cipher_suite) == 0
+	       config_eq_tun_opts(&l->tun.opts, &r->tun.opts)
 #if defined(CONFIG_NET_IPV6)
 	       && memcmp(&l->tun.address6, &r->tun.address6, sizeof(l->tun.address6)) == 0
 	       && memcmp(&l->tun.peer6, &r->tun.peer6, sizeof(l->tun.peer6)) == 0
@@ -578,22 +622,31 @@ static void config_print(void)
 		net_sprint_addr(NET_AF_INET, &config.tun.endpoint.sin_addr),
 		net_ntohs(config.tun.endpoint.sin_port));
 	LOG_DBG("%-16s: %d", "tun.local_port", config.tun.local_port);
-	LOG_DBG("%-16s: '%s'", "tun.psk", config.tun.psk);
+	if (config.tun.opts.proto == PROTO_DTLS) {
+		LOG_DBG("%-16s: '%s'", "tun.proto", "dtls");
+		LOG_DBG("%-16s: '%s'", "tun.cipher_suite", config.tun.opts.u.dtls.cipher_suite);
+		LOG_DBG("%-16s: '%s'", "tun.psk", config.tun.opts.u.dtls.psk);
+	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
+		LOG_DBG("%-16s: '%s'", "tun.proto", "wireguard");
+		LOG_DBG("%-16s: '%s'", "tun.key", config.tun.opts.u.wg.key);
+		LOG_DBG("%-16s: '%s'", "tun.pubkey", config.tun.opts.u.wg.pubkey);
+	}
 	LOG_DBG("%-16s: %zu", "tun.keepalive", config.tun.keepalive_secs);
 	LOG_DBG("%-16s: %d", "tun.mtu", config.tun.mtu);
 }
 
-static int config_set(const char *buf, size_t len)
+static int config_load_new(const char *buf, size_t len)
 {
 	int ret;
-	static struct config new;
 
-	memset(&new, 0, sizeof(new));
+	LOG_DBG("config_load_new %zu", len);
 
-	LOG_DBG("config_set %zu", len);
+	k_mutex_lock(&config_lock, K_FOREVER);
+	memset(&config_new, 0, sizeof(config_new));
 
-	ret = config_load(&new, buf, len);
+	ret = config_load(&config_new, buf, len);
 	if (ret != 0) {
+		k_mutex_unlock(&config_lock);
 		return ret;
 	}
 
@@ -603,21 +656,21 @@ static int config_set(const char *buf, size_t len)
 	ret = settings_save();
 	if (ret != 0) {
 		REPORT("cannot save settings");
+		k_mutex_unlock(&config_lock);
 		return ret;
 	}
 	LOG_INF("settings saved");
 
+	config_new_pending = true;
+
 	/* check for any actual change in parameters and make a cascading reload */
-	if (!config_eq_lan(&config, &new)) {
-		memcpy(&config, &new, sizeof(struct config));
+	if (!config_eq_lan(&config, &config_new)) {
 		REPORT("accepted and saved, reloading lan, wan and tun");
 		event_post(EVENT_CONF_LAN);
-	} else if (!config_eq_wan(&config, &new)) {
-		memcpy(&config, &new, sizeof(struct config));
+	} else if (!config_eq_wan(&config, &config_new)) {
 		REPORT("accepted and saved, reloading wan and tun");
 		event_post(EVENT_CONF_WAN);
-	} else if (!config_eq_tun(&config, &new)) {
-		memcpy(&config, &new, sizeof(struct config));
+	} else if (!config_eq_tun(&config, &config_new)) {
 		REPORT("accepted and saved, reloading tun");
 		event_post(EVENT_CONF_TUN);
 	} else {
@@ -625,6 +678,16 @@ static int config_set(const char *buf, size_t len)
 	}
 
 	return 0;
+}
+
+void config_apply(void)
+{
+	if (config_new_pending) {
+		LOG_DBG("config applied");
+		memcpy(&config, &config_new, sizeof(struct config));
+		config_new_pending = false;
+		k_mutex_unlock(&config_lock);
+	}
 }
 
 static int config_get_handler(enum http_transaction_status status,
@@ -725,7 +788,7 @@ static int config_handler(struct http_client_ctx *client, enum http_transaction_
 		/* tomlc17 expects a null-terminated input */
 		payload[payload_size] = '\0';
 
-		ret = config_set(payload, payload_size);
+		ret = config_load_new(payload, payload_size);
 
 		const char resp_fmt[] = "{\n"
 				" \"status\": %d,\n"
@@ -896,6 +959,8 @@ int config_init()
 	LOG_INF("config loaded");
 
 	config_print();
+
+	k_mutex_init(&config_lock);
 
 	ret = http_server_start();
 	if (ret != 0) {

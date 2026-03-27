@@ -3,15 +3,15 @@
 Vole is a network router firmware based on Zephyr RTOS and wolfSSL library:
 * connects to an upstream IPv4 WiFi network (`wan`),
 * creates an IPv6 WiFi access point for client hosts (`lan`),
-* creates a DTLS 1.3 tunnel (`tun`) through the `wan` to a server,
+* creates a DTLS 1.3 or a WireGuard tunnel (`tun`) through the `wan` to a server,
 * routes traffic through the tunnel,
 * runs an HTTP/1 server (mDNS advertised) for monitoring and configuration.
 
-The primary target is a low-cost esp32-c6 board; esp32-c3 and esp32-s3 are also supported but less tested. There are no hard dependencies on esp32 platform, porting to other Zephyr-supported hardware shouldn't be too hard.
+The primary target is a low-cost esp32-c6 board; some other esp32 variants are also supported but less tested. There are no hard dependencies on esp32 platform, porting to other Zephyr-supported hardware shouldn't be hard.
 
 On esp32-c6, expected tunneling throughput is 2-5 Megabits/s for both directions combined. Peak latency requires improvement.
 
-Supported cipher suites:
+Supported DTLS 1.3 cipher suites:
 * TLS13-AES128-CCM-8-SHA256,
 * TLS13-CHACHA20-POLY1305-SHA256,
 * TLS13-SHA256-SHA256 (null cipher).

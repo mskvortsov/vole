@@ -235,19 +235,11 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 	}
 
 #if defined(CONFIG_NET_IPV6)
-	/* Second, process IPv6 packets coming from TUN: redirect to the correct
-	 * interface if the destination address belongs to us. */
+	/* Second, pass IPv6 packets from TUN to the IPv6 stack as-is.
+	 * The stack looks up the destination globally and processes the packet
+	 * on the tunnel interface so that replies (e.g. ICMPv6 echo) go back
+	 * through the tunnel rather than out the LAN interface. */
 	if (net_pkt_family(pkt) == NET_AF_INET6 && iface == ctx.iface_tun) {
-		NET_PKT_DATA_ACCESS_CONTIGUOUS_DEFINE(ipv6_access, struct net_ipv6_hdr);
-		struct net_ipv6_hdr *ip6_hdr = net_pkt_get_data(pkt, &ipv6_access);
-		if (ip6_hdr) {
-			struct net_if *dst_iface = NULL;
-			net_if_ipv6_addr_lookup_raw(ip6_hdr->dst, &dst_iface);
-			if (dst_iface && dst_iface != ctx.iface_tun) {
-				LOG_PKT_IPV6("tun ipv6 redir", pkt, ip6_hdr);
-				net_pkt_set_iface(pkt, dst_iface);
-			}
-		}
 		return true;
 	}
 #endif

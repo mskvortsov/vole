@@ -25,6 +25,9 @@ function convertUptime(seconds) {
 }
 
 function convertHyphens(str) {
+    if (!str) {
+        return '';
+    }
     const shy = '\u00ad';
     return str.replaceAll('_', `_${shy}`);
 }

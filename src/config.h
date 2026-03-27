@@ -35,16 +35,33 @@ struct config_wan {
 	bool http;
 };
 
+struct config_tun_options {
+	enum {
+		PROTO_UNKNOWN = 0,
+		PROTO_DTLS,
+		PROTO_WIREGUARD,
+	} proto;
+	union {
+		struct {
+			char cipher_suite[48];
+			char psk[64];
+		} dtls;
+		struct {
+			char key[45];
+			char pubkey[45];
+		} wg;
+	} u;
+};
+
 struct config_tun {
 	bool configured;
 	struct net_sockaddr_in endpoint;
 	uint16_t local_port; /* Host byte order */
 	struct cidr4_addr address4;
 	struct net_in_addr peer4;
-	char psk[64];
 	size_t keepalive_secs;
 	uint16_t mtu;
-	char cipher_suite[48];
+	struct config_tun_options opts;
 #if defined(CONFIG_NET_IPV6)
 	struct cidr6_addr address6;
 	struct net_in6_addr peer6;
@@ -64,5 +81,6 @@ const struct net_in_addr *netmask_by_prefix(uint8_t prefix);
 int config_init();
 int config_reset();
 int config_save();
+void config_apply(void);
 
 #endif

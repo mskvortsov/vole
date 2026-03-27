@@ -1,5 +1,5 @@
 diff --git a/drivers/wifi/esp32/src/esp_wifi_drv.c b/drivers/wifi/esp32/src/esp_wifi_drv.c
-index 91941ee09e0..999ebdf1cf2 100644
+index d96c3bfd85d..a9ba8aae2ea 100644
 --- a/drivers/wifi/esp32/src/esp_wifi_drv.c
 +++ b/drivers/wifi/esp32/src/esp_wifi_drv.c
 @@ -93,24 +93,44 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
@@ -103,7 +103,7 @@ index 91941ee09e0..999ebdf1cf2 100644
  	if (net_recv_data(esp32_wifi_iface_ap, pkt) < 0) {
  		LOG_ERR("Failed to push received data");
  		goto pkt_unref;
-@@ -456,8 +481,10 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
+@@ -457,8 +482,10 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
  		esp_wifi_handle_ap_connect_event(event_data);
  		break;
  	case WIFI_EVENT_AP_STADISCONNECTED:

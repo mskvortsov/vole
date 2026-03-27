@@ -74,6 +74,7 @@ psk = "{AP_PSK}"
 http = false
 
 [tun]
+proto = "dtls"
 mtu = {TUN_MTU}
 endpoint = "{INET_SRV_IP}:{TUN_PORT}"
 local_port = 54321

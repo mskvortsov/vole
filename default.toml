@@ -3,6 +3,8 @@
 ssid = "vole"
 psk = "volevole"
 address6 = "fdf7:0fa8:ed0c:0::1/64"
+# https://tunnelbroker.net
+# address6 = "2001:470:xxxx:yyyy::/64"
 dns6 = [ "2606:4700:4700::64", "2001:4860:4860::64" ]
 
 # [wan]
@@ -18,8 +20,14 @@ dns6 = [ "2606:4700:4700::64", "2001:4860:4860::64" ]
 # peer4 = "10.0.0.1"
 # address6 = "fdf7:fa8:ed0c:ffff::2/64"
 # peer6 = "fdf7:fa8:ed0c:ffff::1"
+# keepalive = 15
+
+# proto = "dtls"
 # cipher_suite = "tls13-aes128-ccm-8-sha256"
 # cipher_suite = "tls13-chacha20-poly1305-sha256"
 # cipher_suite = "tls13-sha256-sha256"
 # psk = "AAAAAAAAAAAAAAAAAAAAAA=="
-# keepalive = 15
+
+# proto = "wireguard"
+# key = "<device private key>"
+# pubkey = "<server public key>"

@@ -1,3 +1,44 @@
+diff --git a/subsys/net/ip/ipv6.c b/subsys/net/ip/ipv6.c
+index fc6c2d1177f..bf74ed4f1a1 100644
+--- a/subsys/net/ip/ipv6.c
++++ b/subsys/net/ip/ipv6.c
+@@ -607,14 +607,30 @@ enum net_verdict net_ipv6_input(struct net_pkt *pkt)
+ 
+ 	if (!net_ipv6_is_addr_mcast_raw(hdr->dst)) {
+ 		if (!net_if_ipv6_addr_lookup_by_iface_raw(pkt_iface, hdr->dst)) {
+-			if (ipv6_route_packet(pkt, hdr) == NET_OK) {
+-				return NET_OK;
++			/* Before routing, check if the destination is one of our
++			 * own addresses on a different interface (e.g. a packet
++			 * arriving via a VPN tunnel addressed to the LAN interface
++			 * address).  In that case keep the original receiving
++			 * interface so that ICMPv6 replies are sent back through
++			 * the same interface (i.e. back into the tunnel).
++			 */
++			struct net_if *addr_iface = NULL;
++
++			if (!net_if_ipv6_addr_lookup_raw(hdr->dst, &addr_iface)) {
++				if (ipv6_route_packet(pkt, hdr) == NET_OK) {
++					return NET_OK;
++				}
++
++				NET_DBG("DROP: no such address %s in iface %d",
++					net_sprint_ipv6_addr(hdr->dst),
++					net_if_get_by_iface(pkt_iface));
++				goto drop;
+ 			}
+ 
+-			NET_DBG("DROP: no such address %s in iface %d",
+-				net_sprint_ipv6_addr(hdr->dst),
+-				net_if_get_by_iface(pkt_iface));
+-			goto drop;
++			/* It is our address on another interface — fall through
++			 * and process locally on pkt_iface (the receiving
++			 * interface, e.g. the tunnel).
++			 */
+ 		}
+ 
+ 		/* If we receive a packet with ll source address fe80: and
 diff --git a/subsys/net/ip/ipv6_nbr.c b/subsys/net/ip/ipv6_nbr.c
 index 860a02bb54a..ca16d61eda9 100644
 --- a/subsys/net/ip/ipv6_nbr.c
@@ -50,7 +91,7 @@ index 860a02bb54a..ca16d61eda9 100644
  		}
  	}
 diff --git a/subsys/net/ip/net_if.c b/subsys/net/ip/net_if.c
-index a51f1774089..8844b1b28f2 100644
+index 2cde3ab535d..d031e24dc14 100644
 --- a/subsys/net/ip/net_if.c
 +++ b/subsys/net/ip/net_if.c
 @@ -1161,7 +1161,7 @@ static void join_mcast_allnodes(struct net_if *iface)

@@ -23,11 +23,15 @@ target_compile_options(tomlc17 PRIVATE ${target_flag} ${includes} ${definitions}
     ${options} ${system_includes})
 include_directories(${WEST_TOPDIR}/tomlc17/src)
 
-file(GLOB app_sources src/main.c src/dtls.c src/crypto.c src/bench.c src/npf.c
-    src/config.c src/status.c src/wifi.c src/aqm.c src/telemetry.c)
+set(app_sources src/main.c src/dtls.c src/crypto.c src/bench.c src/npf.c src/sntp.c
+    src/config.c src/status.c src/wifi.c src/aqm.c src/telemetry.c src/wg.c)
+
 if(CONFIG_VOLE_LAN)
     list(APPEND app_sources src/ra.c src/dhcp4.c)
 endif()
+
+zephyr_library_include_directories(${WEST_TOPDIR}/wireguard/include)
+
 target_sources(app PRIVATE ${app_sources})
 target_compile_options(app PRIVATE -Wall -Wextra)
 target_link_libraries(app PUBLIC tomlc17)
@@ -46,6 +50,8 @@ if(CONFIG_RISCV)
     zephyr_ld_options(-Wl,--wrap=wc_Chacha_Process)
     zephyr_linker_sources(DATA_SECTIONS ldscripts/chacha-riscv-sram.ld)
 endif()
+
+zephyr_linker_sources(DATA_SECTIONS ldscripts/sections-tunnel-pool.ld)
 
 if(CONFIG_SOC_SERIES_ESP32S3)
     zephyr_linker_sources(DATA_SECTIONS ldscripts/sections-esp32s3-sram2.ld)

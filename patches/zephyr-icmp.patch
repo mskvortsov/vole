@@ -1,0 +1,30 @@
+diff --git a/subsys/net/ip/icmp.c b/subsys/net/ip/icmp.c
+index 461f55f4c1e..70f19247899 100644
+--- a/subsys/net/ip/icmp.c
++++ b/subsys/net/ip/icmp.c
+@@ -526,9 +526,24 @@ static enum net_verdict icmp_call_handlers(struct net_pkt *pkt,
+ 		    (ctx->code == icmp_hdr->code || ctx->code == 0U)) {
+ 			/* Do not use a handler that is expecting data from different
+ 			 * network interface we sent the request.
++			 * Exception: if the reply destination is an address on
++			 * ctx->iface, allow it even if the packet arrived on a
++			 * different interface (e.g. reply routed back via VPN tunnel).
+ 			 */
+ 			if (ctx->iface != NULL && ctx->iface != net_pkt_iface(pkt)) {
+-				continue;
++				bool dst_on_ctx_iface = false;
++
++				if (IS_ENABLED(CONFIG_NET_IPV6) &&
++				    ip_hdr->family == NET_AF_INET6) {
++					dst_on_ctx_iface =
++						net_if_ipv6_addr_lookup_by_iface_raw(
++							ctx->iface,
++							(const uint8_t *)&ip_hdr->ipv6->dst) != NULL;
++				}
++
++				if (!dst_on_ctx_iface) {
++					continue;
++				}
+ 			}
+ 
+ 			ret = ctx->handler(ctx, pkt, ip_hdr, icmp_hdr, ctx->user_data);

@@ -53,9 +53,6 @@ struct telemetry {
 #define TELEMETRY_PORT         58761
 #define TELEMETRY_PKT_SIZE     (NET_ETH_MAX_HDR_SIZE + NET_IPV4UDPH_LEN + sizeof(struct telemetry))
 #define TELEMETRY_PKT_COUNT    2
-#define TELEMETRY_SNTP_SERVER  "195.186.1.101" /* from europe.pool.ntp.org */
-#define TELEMETRY_SNTP_PORT    123
-#define TELEMETRY_SNTP_TIMEOUT 1000
 
 NET_PKT_SLAB_DEFINE(telemetry_pkt_slab, TELEMETRY_PKT_COUNT);
 NET_BUF_POOL_FIXED_DEFINE(telemetry_buf_pool, TELEMETRY_PKT_COUNT, TELEMETRY_PKT_SIZE, 0, NULL);
@@ -73,6 +70,7 @@ static struct net_sockaddr_in telemetry_dst = {
 	.sin_port = net_htons(TELEMETRY_PORT),
 };
 
+extern int64_t sntp_time(void);
 extern struct k_heap _system_heap;
 
 static size_t telemetry_basic_collect(struct telemetry *telemetry)
@@ -204,64 +202,6 @@ static void telemetry_timer_handler(struct k_timer *timer)
 
 static K_TIMER_DEFINE(telemetry_timer, telemetry_timer_handler, NULL);
 
-static int64_t sntp_time(void)
-{
-	struct sntp_ctx ctx = {0};
-	struct sntp_time ts;
-	struct net_sockaddr_in sntp_addr = {
-		.sin_family = AF_INET,
-		.sin_port = net_htons(TELEMETRY_SNTP_PORT),
-	};
-	struct net_in_addr *src;
-	struct net_sockaddr_in local_addr = {
-		.sin_family = AF_INET,
-		.sin_port = 0,
-	};
-	int ret;
-
-	ret = net_addr_pton(AF_INET, TELEMETRY_SNTP_SERVER, &sntp_addr.sin_addr);
-	if (ret != 0) {
-		return ret;
-	}
-
-	src = net_if_ipv4_get_global_addr(wan_get_iface(), NET_ADDR_PREFERRED);
-	if (!src) {
-		return -EINVAL;
-	}
-	memcpy(&local_addr.sin_addr, src, sizeof(struct net_in_addr));
-
-	ctx.sock.fd = zsock_socket(AF_INET, NET_SOCK_DGRAM, IPPROTO_UDP);
-	if (ctx.sock.fd < 0) {
-		return -errno;
-	}
-
-	ret = zsock_bind(ctx.sock.fd, (struct net_sockaddr *)&local_addr,
-			 sizeof(struct net_sockaddr_in));
-	if (ret < 0) {
-		zsock_close(ctx.sock.fd);
-		return -errno;
-	}
-
-	ret = zsock_connect(ctx.sock.fd, (struct net_sockaddr *)&sntp_addr,
-			    sizeof(struct net_sockaddr_in));
-	if (ret < 0) {
-		zsock_close(ctx.sock.fd);
-		return -errno;
-	}
-
-	ctx.sock.fds[0].fd = ctx.sock.fd;
-	ctx.sock.fds[0].events = ZSOCK_POLLIN;
-	ctx.sock.nfds = 1;
-
-	ret = sntp_query(&ctx, TELEMETRY_SNTP_TIMEOUT, &ts);
-	sntp_close(&ctx);
-	if (ret != 0) {
-		return ret;
-	}
-
-	return ts.seconds * MSEC_PER_SEC + (((uint64_t)ts.fraction * MSEC_PER_SEC) >> 32);
-}
-
 static void print_timestamp_offset_iso8601(const struct shell *sh)
 {
 	struct tm time;
@@ -318,8 +258,7 @@ static int cmd_telemetry_start(const struct shell *sh, size_t argc, char **argv)
 	} else {
 		int64_t res = sntp_time();
 		if (res < 0) {
-			shell_error(sh, "cannot get sntp time from %s (%lld)",
-				    TELEMETRY_SNTP_SERVER, res);
+			shell_error(sh, "cannot get sntp time (%lld)", res);
 			shell_print(sh, "supply an additional seconds argument (unix time)");
 			return -EINVAL;
 		}

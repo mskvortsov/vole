@@ -41,8 +41,8 @@ for tarball in $toolchain_tarballs; do
 done
 
 if [ "$mode" = "dev" ]; then
-    git -C zephyr  apply $(pwd)/vole/patches/zephyr-*.patch
-    git -C wolfssl apply $(pwd)/vole/patches/wolfssl.patch
+    git -C    zephyr apply $(pwd)/vole/patches/zephyr-*.patch
+    git -C   wolfssl apply $(pwd)/vole/patches/wolfssl.patch
     ln --symbolic vole/.zed-workspace .zed
     ln --symbolic vole/.clangd-workspace .clangd
 fi

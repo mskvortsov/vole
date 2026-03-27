@@ -3,7 +3,8 @@ name = "testbed"
 dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
-    "esptool==5.2",
+    "esptool~=5.2.0",
+    "flent~=2.2.0",
 ]
 
 [project.scripts]

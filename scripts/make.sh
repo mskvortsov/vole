@@ -15,6 +15,11 @@ case "$platform" in
         export CROSS_COMPILE=$(pwd)/toolchains/riscv32-esp-elf/bin/riscv32-esp-elf-
         board="esp32c6_devkitc/esp32c6/hpcore"
         ;;
+    esp32c5)
+        export CROSS_COMPILE_TOOLCHAIN_PATH=$(pwd)/toolchains/riscv32-esp-elf
+        export CROSS_COMPILE=$(pwd)/toolchains/riscv32-esp-elf/bin/riscv32-esp-elf-
+        board="esp32c5_devkitc/esp32c5/hpcore"
+        ;;
     esp32c3)
         export CROSS_COMPILE_TOOLCHAIN_PATH=$(pwd)/toolchains/riscv32-esp-elf
         export CROSS_COMPILE=$(pwd)/toolchains/riscv32-esp-elf/bin/riscv32-esp-elf-

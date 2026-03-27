@@ -1,0 +1,116 @@
+diff --git a/subsys/net/lib/wireguard/ns_rtc.c b/subsys/net/lib/wireguard/ns_rtc.c
+index abcc580e464..5b04675885b 100644
+--- a/subsys/net/lib/wireguard/ns_rtc.c
++++ b/subsys/net/lib/wireguard/ns_rtc.c
+@@ -11,6 +11,7 @@ LOG_MODULE_DECLARE(wireguard, CONFIG_WIREGUARD_LOG_LEVEL);
+ 
+ #include <zephyr/kernel.h>
+ #include <zephyr/net/net_core.h>
++#include <zephyr/net/net_log.h>
+ #include <zephyr/net/wireguard.h>
+ #include <zephyr/net/net_log.h>
+ 
+diff --git a/subsys/net/lib/wireguard/wg.c b/subsys/net/lib/wireguard/wg.c
+index 484b7c79963..8ac12fdf0f8 100644
+--- a/subsys/net/lib/wireguard/wg.c
++++ b/subsys/net/lib/wireguard/wg.c
+@@ -19,6 +19,7 @@ LOG_MODULE_REGISTER(wireguard, CONFIG_WIREGUARD_LOG_LEVEL);
+ #include <zephyr/net/net_pkt.h>
+ #include <zephyr/net/net_ip.h>
+ #include <zephyr/net/net_if.h>
++#include <zephyr/net/net_log.h>
+ #include <zephyr/net/net_mgmt.h>
+ #include <zephyr/net/net_event.h>
+ #include <zephyr/net/dummy.h>
+@@ -65,7 +66,11 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt);
+ #define WG_TIMER_PERIOD 500 /* ms */
+ 
+ #define WG_BUF_COUNT CONFIG_WIREGUARD_BUF_COUNT
++#if defined(CONFIG_NET_L2_ETHERNET_RESERVE_HEADER)
++#define WG_MAX_BUF_SIZE (NET_ETH_MAX_HDR_SIZE + CONFIG_WIREGUARD_BUF_LEN)
++#else
+ #define WG_MAX_BUF_SIZE CONFIG_WIREGUARD_BUF_LEN
++#endif
+ 
+ #define WG_DEFAULT_PORT 51820
+ 
+@@ -887,6 +892,9 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ 				"handshake response", ret);
+ 			goto drop;
+ 		}
++
++		net_mgmt_event_notify(NET_EVENT_VPN_CONNECTED, peer->iface);
++
+ 	} else if (hdr->type == MESSAGE_COOKIE_REPLY) {
+ 		ret = handle_cookie_reply(peer, addr, pkt);
+ 		if (ret < 0) {
+@@ -1310,10 +1318,12 @@ static enum net_verdict interface_recv(struct net_if *iface,
+ 
+ 	if (IS_ENABLED(CONFIG_NET_IPV6) && vtc_vhl == 0x60) {
+ 		net_pkt_set_family(pkt, NET_AF_INET6);
++		net_pkt_set_ll_proto_type(pkt, NET_ETH_PTYPE_IPV6);
+ 		return net_ipv6_input(pkt);
+ 
+ 	} else if (IS_ENABLED(CONFIG_NET_IPV4) && vtc_vhl == 0x40) {
+ 		net_pkt_set_family(pkt, NET_AF_INET);
++		net_pkt_set_ll_proto_type(pkt, NET_ETH_PTYPE_IP);
+ 		return net_ipv4_input(pkt);
+ 	}
+ 
+@@ -1895,6 +1905,11 @@ static void iface_cb(struct net_if *iface, void *user_data)
+ 		return;
+ 	}
+ 
++	/* Only match WireGuard virtual interfaces */
++	if (net_if_get_device(iface)->api != &wg_iface_api) {
++		return;
++	}
++
+ 	/* Ignore already attached interfaces */
+ 	if (net_virtual_get_iface(iface) != NULL) {
+ 		return;
+@@ -2052,6 +2067,13 @@ int wireguard_peer_add(struct wireguard_peer_config *peer_config,
+ 		net_sin(net_sad(&peer->cfg_endpoint))->sin_port = net_htons(WG_DEFAULT_PORT);
+ 	}
+ 
++	/* Initialize the active endpoint from the configured one so that
++	 * wg_send_keepalive() / wg_send_handshake_init() can look up the
++	 * target interface via select_target_iface() before the first
++	 * interface_send() call copies cfg_endpoint into endpoint.
++	 */
++	memcpy(&peer->endpoint, &peer->cfg_endpoint, sizeof(peer->endpoint));
++
+ 	peer->id = ++id;
+ 	peer->iface = iface;
+ 	*peer_iface = peer->iface;
+diff --git a/subsys/net/lib/wireguard/wg_crypto.c b/subsys/net/lib/wireguard/wg_crypto.c
+index bfab573437a..65f6dff09f9 100644
+--- a/subsys/net/lib/wireguard/wg_crypto.c
++++ b/subsys/net/lib/wireguard/wg_crypto.c
+@@ -1343,6 +1343,10 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
+ 		return -ENOMEM;
+ 	}
+ 
++#if defined(CONFIG_NET_L2_ETHERNET_RESERVE_HEADER)
++	net_buf_reserve(buf, NET_ETH_MAX_HDR_SIZE);
++#endif
++
+ 	copied = net_buf_linearize(buf->data, data_len, pkt->buffer,
+ 				   ip_udp_hdr_len + sizeof(struct msg_transport_data),
+ 				   data_len);
+@@ -1461,6 +1465,15 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
+ 				continue;
+ 			}
+ 
++			/* mask_len == 0 means 0.0.0.0/0 — allow all.
++			 * Skip the shift (UINT32_MAX << 32 is UB; on RV32 it
++			 * wraps to UINT32_MAX, making the check always false).
++			 */
++			if (peer->allowed_ip[i].mask_len == 0) {
++				addr_found = true;
++				break;
++			}
++
+ 			src.s_addr = sys_get_be32(
+ 				(const uint8_t *)&NET_IPV4_HDR(pkt_decrypted)->src);
+ 			subnet = UINT32_MAX << (32 - peer->allowed_ip[i].mask_len);

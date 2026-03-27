@@ -26,6 +26,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #include "dtls.h"
 #include "npf.h"
 #include "status.h"
+#include "wg.h"
 #include "wifi.h"
 
 static struct net_if *iface_tun;
@@ -75,11 +76,66 @@ static int tun_start(void)
 {
 #if defined(CONFIG_NET_IPV6)
 	struct net_in6_addr prefix6;
+	struct net_nbr *nbr;
 #endif
+	uint32_t events;
 	int ret;
 
 	if (!config.tun.configured) {
 		return 0;
+	}
+
+	if (config.tun.opts.proto == PROTO_DTLS) {
+		struct dtls_interface_config cfg = {
+			.remote_address = config.tun.endpoint,
+			.local_port = config.tun.local_port,
+			.psk_base64 = config.tun.opts.u.dtls.psk,
+			.keepalive_secs = config.tun.keepalive_secs,
+			.mtu = config.tun.mtu,
+			.cipher_suite = config.tun.opts.u.dtls.cipher_suite,
+		};
+
+		iface_tun = net_if_get_by_index(net_if_get_by_name("dtls0"));
+		if (!iface_tun) {
+			LOG_ERR("cannot find dtls0 iface");
+			return -ENODEV;
+		}
+
+		ret = dtls_set_config(iface_tun, &cfg);
+		if (ret != 0) {
+			LOG_ERR("cannot configure tun iface (%d)", ret);
+			return ret;
+		}
+	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
+		struct wg_interface_config cfg = {
+			.remote_address = config.tun.endpoint,
+			.private_key_base64 = config.tun.opts.u.wg.key,
+			.public_key_base64 = config.tun.opts.u.wg.pubkey,
+			.psk_base64 = NULL,
+			.keepalive_secs = config.tun.keepalive_secs,
+		};
+
+		iface_tun = net_if_get_by_index(net_if_get_by_name("wg0"));
+		if (!iface_tun) {
+			LOG_ERR("cannot find wg0 iface");
+			return -ENODEV;
+		}
+
+		/* wireguard_peer_add()
+		 *   net_if_up() on the wg0 interface
+		 *     virtual_enable()
+		 *       net_if_up() on the wg_ctrl interface
+		 *         notify_iface_up() asserts if the link address length is 0
+		 * Set a zero link address to satisfy the check.
+		 */
+		struct net_if *wg_ctrl = net_if_get_by_index(net_if_get_by_name("wg_ctrl"));
+		net_if_set_link_addr(wg_ctrl, NULL, NET_LINK_ADDR_MAX_LENGTH, NET_LINK_UNKNOWN);
+
+		ret = wg_set_config(iface_tun, &cfg);
+		if (ret != 0) {
+			LOG_ERR("cannot configure wireguard iface (%d)", ret);
+			return ret;
+		}
 	}
 
 	tun_if_addr = net_if_ipv4_addr_add(iface_tun, &config.tun.address4.addr, NET_ADDR_MANUAL, 0);
@@ -110,9 +166,8 @@ static int tun_start(void)
 		return 1;
 	}
 
-	struct net_nbr *nbr = net_ipv6_nbr_add(iface_tun, &config.tun.peer6,
-					       net_if_get_link_addr(iface_tun),
-					       false, NET_IPV6_NBR_STATE_STATIC);
+	nbr = net_ipv6_nbr_add(iface_tun, &config.tun.peer6, net_if_get_link_addr(iface_tun), false,
+			       NET_IPV6_NBR_STATE_STATIC);
 	if (!nbr) {
 		LOG_ERR("cannot add ipv6 neighbor for tun peer");
 		return 1;
@@ -126,29 +181,23 @@ static int tun_start(void)
 	}
 #endif
 
-	struct dtls_interface_config cfg = {
-		.remote_address = config.tun.endpoint,
-		.local_port = config.tun.local_port,
-		.psk_base64 = config.tun.psk,
-		.keepalive_secs = config.tun.keepalive_secs,
-		.mtu = config.tun.mtu,
-		.cipher_suite = config.tun.cipher_suite,
-	};
-	ret = dtls_set_config(iface_tun, &cfg);
-	if (ret != 0) {
-		LOG_ERR("cannot configure tun iface (%d)", ret);
-		return ret;
-	}
-
-	ret = net_virtual_interface_attach(iface_tun, wan_get_iface());
-	if (ret != 0) {
-		LOG_ERR("cannot attach tun iface to sta: %s (%d)", strerror(-ret), ret);
-		return ret;
-	}
-	ret = net_if_up(iface_tun);
-	if (ret != 0) {
-		LOG_ERR("cannot set tun iface up: %s (%d)", strerror(-ret), ret);
-		return ret;
+	if (config.tun.opts.proto == PROTO_DTLS) {
+		ret = net_virtual_interface_attach(iface_tun, wan_get_iface());
+		if (ret != 0) {
+			LOG_ERR("cannot attach tun iface to sta: %s (%d)", strerror(-ret), ret);
+			return ret;
+		}
+		ret = net_if_up(iface_tun);
+		if (ret != 0) {
+			LOG_ERR("cannot set tun iface up: %s (%d)", strerror(-ret), ret);
+			return ret;
+		}
+	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
+		ret = wg_initiate();
+		if (ret != 0) {
+			LOG_ERR("cannot initiate wireguard handshake (%d)", ret);
+			return ret;
+		}
 	}
 
 	ret = npf_start(lan_get_iface(), wan_get_iface(), iface_tun);
@@ -157,7 +206,7 @@ static int tun_start(void)
 	}
 
 	/* TODO EVENT_TUN_CONN_FAILED */
-	uint32_t events = event_consume(EVENT_TUN_CONNECTED, TUN_CONNECT_TIMEOUT);
+	events = event_consume(EVENT_TUN_CONNECTED, TUN_CONNECT_TIMEOUT);
 	if (events == 0) {
 		LOG_DBG("no connected event from tun");
 		return 1;
@@ -183,23 +232,29 @@ static int tun_stop(void)
 		tun_router6 = NULL;
 	}
 
-	net_ipv6_nbr_rm(iface_tun, &config.tun.peer6);
+	if (iface_tun) {
+		net_ipv6_nbr_rm(iface_tun, &config.tun.peer6);
+	}
 #endif
 
-	ret = net_if_down(iface_tun);
-	if (ret == -EALREADY) {
-		LOG_DBG("tun is already stopped");
-	} else if (ret != 0) {
-		LOG_ERR("cannot set tun iface down (%d)", ret);
-		return ret;
-	}
+	if (config.tun.opts.proto == PROTO_DTLS && iface_tun) {
+		ret = net_if_down(iface_tun);
+		if (ret == -EALREADY) {
+			LOG_DBG("tun is already stopped");
+		} else if (ret != 0) {
+			LOG_ERR("cannot set tun iface down (%d)", ret);
+			return ret;
+		}
 
-	ret = net_virtual_interface_attach(iface_tun, NULL);
-	if (ret == -EALREADY) {
-		LOG_DBG("tun is already detached");
-	} else if (ret != 0) {
-		LOG_ERR("cannot detach tun iface from wan (%d)", ret);
-		return ret;
+		ret = net_virtual_interface_attach(iface_tun, NULL);
+		if (ret == -EALREADY) {
+			LOG_DBG("tun is already detached");
+		} else if (ret != 0) {
+			LOG_ERR("cannot detach tun iface from wan (%d)", ret);
+			return ret;
+		}
+	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
+		wg_remove();
 	}
 
 #if defined(CONFIG_NET_IPV6)
@@ -228,6 +283,8 @@ static int tun_stop(void)
 		}
 		tun_if_addr = NULL;
 	}
+
+	iface_tun = NULL;
 
 	status_set(SUBSYS_TUN, STATUS_OFF);
 	return 0;
@@ -311,7 +368,10 @@ extern void aqm_init(uint16_t mtu);
 
 int main(void)
 {
+	int wdt_channel_id;
+	uint32_t events;
 	int ret;
+
 	LOG_INF("starting " CONFIG_NET_HOSTNAME " " VERSION_STRING);
 	log_flush();
 
@@ -368,12 +428,6 @@ int main(void)
 		fatal();
 	}
 
-	iface_tun = net_if_get_by_index(net_if_get_by_name("dtls0"));
-	if (!iface_tun) {
-		LOG_ERR("cannot get tun iface");
-		fatal();
-	}
-
 	net_mgmt_init_event_callback(&vpn_mgmt_cb, tun_mgmt_event_handler,
 				     NET_EVENT_VPN_CONNECTED | NET_EVENT_VPN_DISCONNECTED);
 	net_mgmt_add_event_callback(&vpn_mgmt_cb);
@@ -383,14 +437,14 @@ int main(void)
 	status_set(SUBSYS_TUN, STATUS_OFF);
 	event_post(EVENT_CONF_LAN);
 
-	int wdt_channel_id = wdt_start();
+	wdt_channel_id = wdt_start();
 	if (wdt_channel_id < 0) {
 		LOG_ERR("cannot start the watchdog");
 	}
 
 	while (true) {
-		uint32_t events = EVENT_CONF_LAN | EVENT_CONF_WAN | EVENT_CONF_TUN |
-				  EVENT_WAN_DISCONNECTED | EVENT_TUN_DISCONNECTED;
+		events = EVENT_CONF_LAN | EVENT_CONF_WAN | EVENT_CONF_TUN | EVENT_WAN_DISCONNECTED |
+			 EVENT_TUN_DISCONNECTED;
 		events = event_consume(events, EVENTS_POLL_TIMEOUT);
 
 #if 0
@@ -414,6 +468,7 @@ int main(void)
 			wan_stop();
 			gpio_pin_set_dt(&led_wan, 1);
 			lan_stop();
+			config_apply();
 			if (lan_start() == 0) {
 				if (wan_start() == 0) {
 					gpio_pin_set_dt(&led_wan, 0);
@@ -428,6 +483,7 @@ int main(void)
 			gpio_pin_set_dt(&led_tun, 1);
 			wan_stop();
 			gpio_pin_set_dt(&led_wan, 1);
+			config_apply();
 			if (wan_start() == 0) {
 				gpio_pin_set_dt(&led_wan, 0);
 				if (tun_start() == 0) {
@@ -438,6 +494,7 @@ int main(void)
 			   status_get(SUBSYS_TUN) != STATUS_ON) {
 			tun_stop();
 			gpio_pin_set_dt(&led_tun, 1);
+			config_apply();
 			if (tun_start() == 0) {
 				gpio_pin_set_dt(&led_tun, 0);
 			}

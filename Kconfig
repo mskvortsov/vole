@@ -7,11 +7,12 @@ config VOLE_LAN
 	select NET_ROUTING
 
 config NET_IF_MAX_IPV4_COUNT
-	default 3 if VOLE_LAN
-	default 2
+	default 4 if VOLE_LAN
+	default 3
 
 config NET_IF_MAX_IPV6_COUNT
-	default 3 if VOLE_LAN
+	default 4 if VOLE_LAN
+	default 3
 
 config NET_IF_MCAST_IPV6_ADDR_COUNT
 	default 5 if VOLE_LAN
@@ -42,6 +43,10 @@ config CODEL_INTERVAL_MS
 endmenu
 
 source "Kconfig.zephyr"
+
+module = CONFIG
+module-str = config
+source "subsys/logging/Kconfig.template.log_config"
 
 module = DTLS
 module-str = dtls
