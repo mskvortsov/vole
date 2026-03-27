@@ -69,6 +69,13 @@ create table ip6 vole_lan_masq {
 }
 EOF
 
+# Instead of NAT66, you may want to get a /64 prefix from a tunnel broker
+# (VOLE_LAN_PREFIX becomes 2001:470:28:xxxx::/64)
+#   ip tunnel add he-ipv6 mode sit remote r.r.r.r local l.l.l.l ttl 255
+#   ip link set he-ipv6 up
+#   ip addr add 2001:470:27:xxxx::2/64 dev he-ipv6
+#   ip route add ::/0 dev he-ipv6 metric 100
+
 # Source NAT for accessing vole's WAN from the server side
 
 nft -f - <<EOF

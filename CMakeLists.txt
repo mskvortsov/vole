@@ -25,8 +25,8 @@ include_directories(${WEST_TOPDIR}/tomlc17/src)
 
 file(GLOB app_sources src/main.c src/dtls.c src/crypto.c src/bench.c src/npf.c
     src/config.c src/status.c src/wifi.c src/aqm.c src/telemetry.c)
-if(CONFIG_NET_IPV6)
-    list(APPEND app_sources src/ra.c)
+if(CONFIG_VOLE_LAN)
+    list(APPEND app_sources src/ra.c src/dhcp4.c)
 endif()
 target_sources(app PRIVATE ${app_sources})
 target_compile_options(app PRIVATE -Wall -Wextra)

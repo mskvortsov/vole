@@ -144,16 +144,6 @@ static int send_ra(struct net_if *iface, const struct net_in6_addr *dst)
 	net_pkt_cursor_init(pkt);
 	net_ipv6_finalize(pkt, NET_IPPROTO_ICMPV6);
 
-	/* With CONFIG_NET_L2_ETHERNET_RESERVE_HEADER=y, ethernet_fill_header()
-	 * calls net_buf_push() before ethernet_fill_in_dst_on_ipv6_mcast(),
-	 * shifting pkt->frags->data so NET_IPV6_HDR(pkt)->dst no longer points
-	 * at the IPv6 destination.  The multicast-MAC mapping never fires and
-	 * the fallback copies net_pkt_lladdr_dst->addr into the Ethernet
-	 * header.  Set it explicitly to ensure 33:33:00:00:00:01 is used.
-	 */
-	static const uint8_t all_nodes_mac[] = {0x33, 0x33, 0x00, 0x00, 0x00, 0x01};
-	net_linkaddr_set(net_pkt_lladdr_dst(pkt), all_nodes_mac, sizeof(all_nodes_mac));
-
 	if (net_send_data(pkt) != 0) {
 		goto drop;
 	}

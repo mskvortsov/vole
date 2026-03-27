@@ -42,6 +42,14 @@ LOG_MODULE_REGISTER(npf, CONFIG_NPF_LOG_LEVEL);
 #define IPV6_TCP_MSS_OVERHEAD (sizeof(struct net_ipv6_hdr) + sizeof(struct net_tcp_hdr))
 #endif
 
+#define DHCP_SERVER_PORT 67
+#define DHCP_CLIENT_PORT 68
+#define HTTP_PORT        80
+
+#if defined(CONFIG_VOLE_LAN)
+extern struct net_pkt *dhcp_lan_recv(struct net_pkt *pkt);
+#endif
+
 struct icmp_rate_limit_entry {
 	bool used;
 	struct net_addr addr;
@@ -55,8 +63,8 @@ static struct {
 	struct net_in_addr wan_address;
 	size_t tun_mtu;
 
-	struct k_work icmp_work;
-	struct k_fifo icmp_tx_fifo;
+	struct k_work tx_work;
+	struct k_fifo tx_fifo;
 	struct icmp_rate_limit_entry icmp_rate_limited[ICMP_RATE_LIMIT_ENTRIES_NUM];
 	struct k_mutex icmp_lock;
 
@@ -284,6 +292,28 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 		goto pass;
 	}
 
+#if defined(CONFIG_VOLE_LAN)
+	/* Intercept a DHCP request on LAN and reply with RFC 8925 option 108. */
+	if (iface == ctx.iface_lan && ip_hdr->proto == NET_IPPROTO_UDP) {
+		uint8_t ip_hlen = (ip_hdr->vhl & 0x0f) * 4;
+		if (net_pkt_skip(pkt, ip_hlen) != 0) {
+			return false;
+		}
+
+		NET_PKT_DATA_ACCESS_DEFINE(udp_access, struct net_udp_hdr);
+		struct net_udp_hdr *udp_hdr = net_pkt_get_data(pkt, &udp_access);
+		if (udp_hdr && net_htons(udp_hdr->dst_port) == DHCP_SERVER_PORT) {
+			struct net_pkt *reply = dhcp_lan_recv(pkt);
+			if (reply) {
+				k_fifo_put(&ctx.tx_fifo, reply);
+				k_work_submit(&ctx.tx_work);
+			}
+			return false;
+		}
+		goto pass;
+	}
+#endif
+
 	/* Pass broadcast/multicast. */
 	if ((ctx.iface_lan && net_ipv4_is_addr_bcast_raw(ctx.iface_lan, ip_hdr->dst)) ||
 	    net_ipv4_is_addr_bcast_raw(ctx.iface_wan, ip_hdr->dst) ||
@@ -302,13 +332,13 @@ static bool npf_test_recv_fn(struct npf_test *t, struct net_pkt *pkt)
 		if (ip_hdr->proto == NET_IPPROTO_UDP) {
 			NET_PKT_DATA_ACCESS_DEFINE(udp_access, struct net_udp_hdr);
 			struct net_udp_hdr *udp_hdr = net_pkt_get_data(pkt, &udp_access);
-			if (!udp_hdr || net_htons(udp_hdr->dst_port) == 68) {
+			if (!udp_hdr || net_htons(udp_hdr->dst_port) == DHCP_CLIENT_PORT) {
 				goto pass;
 			}
 		} else if (ip_hdr->proto == NET_IPPROTO_TCP && config.wan.http) {
 			NET_PKT_DATA_ACCESS_DEFINE(tcp_access, struct net_tcp_hdr);
 			struct net_tcp_hdr *tcp_hdr = net_pkt_get_data(pkt, &tcp_access);
-			if (!tcp_hdr || net_htons(tcp_hdr->dst_port) == 80) {
+			if (!tcp_hdr || net_htons(tcp_hdr->dst_port) == HTTP_PORT) {
 				goto pass;
 			}
 		}
@@ -367,12 +397,12 @@ static struct npf_rule npf_rule_recv = {
 	.tests = { &npf_test_recv },
 };
 
-static void icmp_worker(struct k_work *work)
+static void tx_worker(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	while (!k_fifo_is_empty(&ctx.icmp_tx_fifo)) {
-		struct net_pkt *pkt = k_fifo_get(&ctx.icmp_tx_fifo, K_FOREVER);
+	while (!k_fifo_is_empty(&ctx.tx_fifo)) {
+		struct net_pkt *pkt = k_fifo_get(&ctx.tx_fifo, K_FOREVER);
 		if (net_send_data(pkt) != 0) {
 			net_pkt_unref(pkt);
 		}
@@ -425,8 +455,8 @@ static void send_icmpv4_unreach(struct net_if *iface, struct net_pkt *pkt_bad, u
 	}
 
 	/* Send later from the system work queue thread. */
-	k_fifo_put(&ctx.icmp_tx_fifo, pkt);
-	k_work_submit(&ctx.icmp_work);
+	k_fifo_put(&ctx.tx_fifo, pkt);
+	k_work_submit(&ctx.tx_work);
 
 	return;
 
@@ -487,8 +517,8 @@ static void send_icmpv6_ptb(struct net_if *iface, struct net_pkt *pkt_bad, uint1
 		goto fail;
 	}
 
-	k_fifo_put(&ctx.icmp_tx_fifo, pkt);
-	k_work_submit(&ctx.icmp_work);
+	k_fifo_put(&ctx.tx_fifo, pkt);
+	k_work_submit(&ctx.tx_work);
 	return;
 
 fail:
@@ -669,8 +699,8 @@ static int npf_init()
 	}
 	init_done = true;
 
-	k_fifo_init(&ctx.icmp_tx_fifo);
-	k_work_init(&ctx.icmp_work, icmp_worker);
+	k_fifo_init(&ctx.tx_fifo);
+	k_work_init(&ctx.tx_work, tx_worker);
 	k_mutex_init(&ctx.icmp_lock);
 
 	return 0;
@@ -728,10 +758,10 @@ int npf_stop(void)
 		return 1;
 	}
 
-	k_work_cancel_sync(&ctx.icmp_work, &sync);
+	k_work_cancel_sync(&ctx.tx_work, &sync);
 
-	while (!k_fifo_is_empty(&ctx.icmp_tx_fifo)) {
-		struct net_pkt *pkt = k_fifo_get(&ctx.icmp_tx_fifo, K_FOREVER);
+	while (!k_fifo_is_empty(&ctx.tx_fifo)) {
+		struct net_pkt *pkt = k_fifo_get(&ctx.tx_fifo, K_FOREVER);
 		net_pkt_unref(pkt);
 	}
 
