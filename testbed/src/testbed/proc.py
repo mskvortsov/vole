@@ -1,39 +1,67 @@
 import json
+import os
 import subprocess
 import time
+from contextlib import ExitStack
 
 import testbed.config as cfg
 from testbed.device import ts
-from testbed.net import output, start
+from testbed.net import output, run, start
 
 
-def start_sta() -> subprocess.Popen:
-    wpa = start("wpa_supplicant", "-i", cfg.STA_IFACE, "-c", "/dev/stdin", ns=cfg.WIFI_NS, stdin=subprocess.PIPE, text=True)
-    assert wpa.stdin is not None
-    wpa.stdin.write(cfg.wpa_conf)
-    wpa.stdin.close()
-    return wpa
+def start_sta(output_dir: str) -> ExitStack:
+    stack = ExitStack()
+    with stack:
+        wpa = start(
+            "wpa_supplicant",
+            "-i",
+            cfg.STA_IFACE,
+            "-c",
+            "/dev/stdin",
+            ns=cfg.WIFI_NS,
+            log=os.path.join(output_dir, "wpa_supplicant.log"),
+            stdin=subprocess.PIPE,
+        )
+        assert wpa.stdin is not None
+        wpa.stdin.write(cfg.wpa_conf)
+        wpa.stdin.close()
+        stack.callback(wpa.terminate)
+        stack.callback(run, "ip", "addr", "flush", "dev", cfg.STA_IFACE, ns=cfg.WIFI_NS)
+        return stack.pop_all()
 
 
-def start_tun(tun_executable: str) -> subprocess.Popen:
-    tun = start(tun_executable, "-", ns=cfg.SERVER_NS, stdin=subprocess.PIPE, text=True)
-    assert tun.stdin is not None
-    print(ts(), cfg.tun_server_conf)
-    tun.stdin.write(cfg.tun_server_conf)
-    tun.stdin.close()
-    return tun
+def start_tun(tun_executable: str, output_dir: str) -> ExitStack:
+    stack = ExitStack()
+    with stack:
+        print(ts(), cfg.tun_server_conf)
+        tun = start(tun_executable, "-", ns=cfg.SERVER_NS, log=os.path.join(output_dir, "tun.log"),
+                    stdin_data=cfg.tun_server_conf, wait_for="listening")
+        stack.callback(tun.terminate)
+        return stack.pop_all()
 
 
-def start_ap(vole_wan_bssid: str) -> tuple[subprocess.Popen, subprocess.Popen]:
-    hostapd = start("hostapd", "/dev/stdin", ns=cfg.WIFI_NS, stdin=subprocess.PIPE, text=True)
-    assert hostapd.stdin is not None
-    hostapd.stdin.write(cfg.hostapd_conf)
-    hostapd.stdin.close()
-    dnsmasq = start("dnsmasq", "--keep-in-foreground", "--conf-file=/dev/stdin", ns=cfg.WIFI_NS, stdin=subprocess.PIPE, text=True)
-    assert dnsmasq.stdin is not None
-    dnsmasq.stdin.write(cfg.dnsmasq_conf(vole_wan_bssid))
-    dnsmasq.stdin.close()
-    return hostapd, dnsmasq
+def start_ap(vole_wan_bssid: str, output_dir: str) -> ExitStack:
+    stack = ExitStack()
+    with stack:
+        hostapd = start("hostapd", "/dev/stdin", ns=cfg.WIFI_NS, log=os.path.join(output_dir, "hostapd.log"), stdin=subprocess.PIPE)
+        assert hostapd.stdin is not None
+        hostapd.stdin.write(cfg.hostapd_conf)
+        hostapd.stdin.close()
+        stack.callback(hostapd.terminate)
+        dnsmasq = start(
+            "dnsmasq",
+            "--keep-in-foreground",
+            "--conf-file=/dev/stdin",
+            ns=cfg.WIFI_NS,
+            log=os.path.join(output_dir, "dnsmasq.log"),
+            stdin=subprocess.PIPE,
+        )
+        assert dnsmasq.stdin is not None
+        dnsmasq.stdin.write(cfg.dnsmasq_conf(vole_wan_bssid))
+        dnsmasq.stdin.close()
+        stack.callback(dnsmasq.terminate)
+        stack.callback(run, "iw", "dev", cfg.AP_IFACE, "del", ns=cfg.WIFI_NS)
+        return stack.pop_all()
 
 
 def get_status(timeout: int = 30) -> dict:
@@ -63,7 +91,7 @@ def post_config(config: str) -> None:
 
 def wait_sta_associated(timeout: int = 15) -> None:
     for _ in range(timeout):
-        out = output("wpa_cli", "-i", cfg.STA_IFACE, "status", ns=cfg.WIFI_NS)
+        out = output("wpa_cli", "-i", cfg.STA_IFACE, "status", check=False, ns=cfg.WIFI_NS)
         for line in out.splitlines():
             if line.startswith("wpa_state="):
                 if line.split("=", 1)[1] == "COMPLETED":
@@ -86,7 +114,7 @@ def wait_slaac(timeout: int = 30) -> None:
 
 def wait_ap_associated(bssid: str, timeout: int = 30) -> None:
     for _ in range(timeout):
-        out = output("hostapd_cli", "-i", cfg.AP_IFACE, "sta", bssid, ns=cfg.WIFI_NS)
+        out = output("hostapd_cli", "-i", cfg.AP_IFACE, "sta", bssid, check=False, ns=cfg.WIFI_NS)
         if "FAIL" not in out:
             return
         time.sleep(1)

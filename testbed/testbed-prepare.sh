@@ -5,7 +5,10 @@ set -eux
 
 # run once
 
-apt install -y uv tcpdump hostapd dnsmasq wpasupplicant dhcpcd5 jool-dkms jool-tools uhubctl iperf3
+apt install -y uv uhubctl \
+    hostapd dnsmasq wpasupplicant dhcpcd5 \
+    jool-dkms jool-tools \
+    tcpdump iperf3 netperf fping
 uv sync
 
 systemctl mask hostapd dnsmasq dhcpcd wpa_supplicant
