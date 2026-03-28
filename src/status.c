@@ -3,7 +3,10 @@ LOG_MODULE_REGISTER(status, LOG_LEVEL_INF);
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
+#include <zephyr/kernel.h>
+#include <zephyr/data/json.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_stats.h>
@@ -71,7 +74,7 @@ static int cursor_emit(struct cursor *c, const char *fmt, ...)
 		LOG_ERR("vsnprintf error (%d)", ret);
 		return 1;
 	}
-	if ((size_t)ret > c->rem) {
+	if ((size_t)ret >= c->rem) {
 		LOG_ERR("string of %d bytes doesn't fit into %zu bytes", ret, c->rem);
 		return 1;
 	}
@@ -80,17 +83,44 @@ static int cursor_emit(struct cursor *c, const char *fmt, ...)
 	return 0;
 }
 
+static int cursor_emit_json_field(struct cursor *c, const char *indent, const char *name,
+				  const char *value, bool last)
+{
+	size_t value_len = strlen(value);
+	size_t escaped_len = json_calc_escaped_len(value, value_len);
+	char *escaped = k_malloc(escaped_len + 1);
+	int ret;
+
+	if (!escaped) {
+		LOG_ERR("cannot allocate %zu bytes for json field %s", escaped_len + 1, name);
+		return 1;
+	}
+
+	memcpy(escaped, value, value_len + 1);
+	ret = json_escape(escaped, &value_len, escaped_len + 1);
+	if (ret < 0) {
+		LOG_ERR("cannot escape json field %s", name);
+		k_free(escaped);
+		return 1;
+	}
+
+	ret = cursor_emit(c, "%s\"%s\": \"%s\"%s\n", indent, name, escaped, last ? "" : ",");
+	k_free(escaped);
+	return ret;
+}
+
 static int status_sys_json(struct cursor *c)
 {
-	return cursor_emit(c,
-		" \"sys\": {\n"
-			JSON_ENTRY("  ", "version", "\"" VERSION_STRING "\"")
-			JSON_ENTRY("  ", "board", "\"" CONFIG_BOARD "\"")
-			JSON_ENTRY("  ", "uptime", "%lld")
-			JSON_ENTRY_LAST("  ", "reboot_count", "%zu")
-		" },\n",
-		k_uptime_get() / MSEC_PER_SEC,
-		info.reboot_count);
+	if (cursor_emit(c, " \"sys\": {\n") != 0 ||
+	    cursor_emit_json_field(c, "  ", "version", VERSION_STRING, false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "board", CONFIG_BOARD, false) != 0 ||
+	    cursor_emit(c, "  \"uptime\": %lld,\n", k_uptime_get() / MSEC_PER_SEC) != 0 ||
+	    cursor_emit(c, "  \"reboot_count\": %zu\n", info.reboot_count) != 0 ||
+	    cursor_emit(c, " },\n") != 0) {
+		return 1;
+	}
+
+	return 0;
 }
 
 static int status_heap_json(struct cursor *c)
@@ -157,21 +187,19 @@ static int status_lan_json(struct cursor *c)
 	}
 #endif
 
-	return cursor_emit(c,
-		" \"lan\": {\n"
-			JSON_ENTRY("  ", "bssid", "\"%s\"")
+	if (cursor_emit(c, " \"lan\": {\n") != 0 ||
+	    cursor_emit_json_field(c, "  ", "bssid", mac_str(net_if_get_link_addr(iface)->addr),
+				   false) != 0 ||
 #if defined(CONFIG_NET_STATISTICS_WIFI)
-			JSON_ENTRY("  ", "errors_rx", "%u")
-			JSON_ENTRY("  ", "errors_tx", "%u")
+	    cursor_emit(c, "  \"errors_rx\": %u,\n", stats.errors.rx) != 0 ||
+	    cursor_emit(c, "  \"errors_tx\": %u,\n", stats.errors.tx) != 0 ||
 #endif
-			JSON_ENTRY_LAST("  ", "num_connected", "%zu")
-		" },\n",
-		mac_str(net_if_get_link_addr(iface)->addr),
-#if defined(CONFIG_NET_STATISTICS_WIFI)
-		stats.errors.rx,
-		stats.errors.tx,
-#endif
-		info.lan_num_connected);
+	    cursor_emit(c, "  \"num_connected\": %zu\n", info.lan_num_connected) != 0 ||
+	    cursor_emit(c, " },\n") != 0) {
+		return 1;
+	}
+
+	return 0;
 }
 
 static int status_wan_json(struct cursor *c)
@@ -180,6 +208,8 @@ static int status_wan_json(struct cursor *c)
 	struct cidr4_addr address = {0};
 	struct net_in_addr gateway = {0};
 	struct wifi_iface_status status = {0};
+	char address_buf[NET_IPV4_ADDR_LEN + 4];
+	char gateway_buf[NET_IPV4_ADDR_LEN];
 	int ret;
 
 	const struct net_if_ipv4 *if_ipv4 = iface->config.ip.ipv4;
@@ -205,72 +235,83 @@ static int status_wan_json(struct cursor *c)
 	}
 #endif
 
-	return cursor_emit(c,
-		" \"wan\": {\n"
-			JSON_ENTRY("  ", "bssid", "\"%s\"")
-			JSON_ENTRY("  ", "ap_bssid", "\"%s\"")
-			JSON_ENTRY("  ", "band", "\"%s\"")
-			JSON_ENTRY("  ", "channel", "%u")
-			JSON_ENTRY("  ", "link_mode", "\"%s\"")
-			JSON_ENTRY("  ", "rssi", "%d")
+	if (cursor_emit(c, " \"wan\": {\n") != 0 ||
+	    cursor_emit_json_field(c, "  ", "bssid", mac_str(net_if_get_link_addr(iface)->addr),
+				   false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "ap_bssid", mac_str(status.bssid), false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "band", wifi_band_str(status.band), false) != 0 ||
+	    cursor_emit(c, "  \"channel\": %u,\n", status.channel) != 0 ||
+	    cursor_emit_json_field(c, "  ", "link_mode", wifi_link_mode_str(status.link_mode),
+				   false) != 0 ||
+	    cursor_emit(c, "  \"rssi\": %d,\n", status.rssi) != 0 ||
 #if defined(CONFIG_NET_STATISTICS_WIFI)
-			JSON_ENTRY("  ", "errors_rx", "%u")
-			JSON_ENTRY("  ", "errors_tx", "%u")
+	    cursor_emit(c, "  \"errors_rx\": %u,\n", stats.errors.rx) != 0 ||
+	    cursor_emit(c, "  \"errors_tx\": %u,\n", stats.errors.tx) != 0 ||
 #endif
-			JSON_ENTRY("  ", "status", "\"%s\"")
-			JSON_ENTRY("  ", "address", "\"%s/%u\"")
-			JSON_ENTRY_LAST("  ", "gateway", "\"%s\"")
-		" },\n",
-		mac_str(net_if_get_link_addr(iface)->addr),
-		mac_str(status.bssid),
-		wifi_band_str(status.band),
-		status.channel,
-		wifi_link_mode_str(status.link_mode),
-		status.rssi,
-#if defined(CONFIG_NET_STATISTICS_WIFI)
-		stats.errors.rx,
-		stats.errors.tx,
-#endif
-		info.wan_status,
-		net_sprint_addr(NET_AF_INET, &address.addr), address.prefix,
-		net_sprint_addr(NET_AF_INET, &gateway));
+	    cursor_emit_json_field(c, "  ", "status", info.wan_status, false) != 0) {
+		return 1;
+	}
+
+	snprintk(address_buf, sizeof(address_buf), "%s/%u",
+		 net_sprint_addr(NET_AF_INET, &address.addr), address.prefix);
+	snprintk(gateway_buf, sizeof(gateway_buf), "%s", net_sprint_addr(NET_AF_INET, &gateway));
+
+	if (cursor_emit_json_field(c, "  ", "address", address_buf, false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "gateway", gateway_buf, true) != 0 ||
+	    cursor_emit(c, " },\n") != 0) {
+		return 1;
+	}
+
+	return 0;
 }
 
 static int status_tun_json(struct cursor *c)
 {
-	struct dtls_stats *stats = dtls_stats();
+	struct dtls_stats *stats;
 
-	return cursor_emit(c,
-		" \"tun\": {\n"
-			JSON_ENTRY("  ", "rtt", "%zu")
-			JSON_ENTRY("  ", "rcvd_orig_bytes", "%zu")
-			JSON_ENTRY("  ", "rcvd_bytes", "%zu")
-			JSON_ENTRY("  ", "rcvd_packets", "%zu")
-			JSON_ENTRY("  ", "sent_orig_bytes", "%zu")
-			JSON_ENTRY("  ", "sent_bytes", "%zu")
-			JSON_ENTRY("  ", "sent_packets", "%zu")
-			JSON_ENTRY("  ", "allocs_failed", "%zu")
-			JSON_ENTRY("  ", "pkt_pool_hwm", "%zu")
-			JSON_ENTRY("  ", "early_drops", "%zu")
-			JSON_ENTRY("  ", "downs", "%zu")
-			JSON_ENTRY("  ", "version", "\"%s\"")
-			JSON_ENTRY("  ", "curve_name", "\"%s\"")
-			JSON_ENTRY_LAST("  ", "cipher_suite", "\"%s\"")
-		" }\n",
-		stats->rtt_us,
-		stats->rcvd_orig_bytes,
-		stats->rcvd_bytes,
-		stats->rcvd_packets,
-		stats->sent_orig_bytes,
-		stats->sent_bytes,
-		stats->sent_packets,
-		stats->allocs_failed,
-		stats->pkt_pool_hwm,
-		stats->early_drops,
-		info.tun_downs,
-		str_or(stats->version, ""),
-		str_or(stats->curve_name, ""),
-		str_or(stats->cipher_suite, ""));
+	if (config.tun.opts.proto == PROTO_WIREGUARD) {
+		if (cursor_emit(c, " \"tun\": {\n") != 0 ||
+		    cursor_emit(c, "  \"proto\": \"wireguard\",\n") != 0 ||
+		    cursor_emit(c, "  \"downs\": %zu\n", info.tun_downs) != 0 ||
+		    cursor_emit(c, " }\n") != 0) {
+			return 1;
+		}
+		return 0;
+	}
+
+	if (config.tun.opts.proto != PROTO_DTLS) {
+		if (cursor_emit(c, " \"tun\": {\n") != 0 ||
+		    cursor_emit(c, "  \"proto\": \"unknown\"\n") != 0 ||
+		    cursor_emit(c, " }\n") != 0) {
+			return 1;
+		}
+		return 0;
+	}
+
+	stats = dtls_stats();
+	if (cursor_emit(c, " \"tun\": {\n") != 0 ||
+	    cursor_emit(c, "  \"proto\": \"dtls\",\n") != 0 ||
+	    cursor_emit(c, "  \"rtt\": %zu,\n", stats->rtt_us) != 0 ||
+	    cursor_emit(c, "  \"rcvd_orig_bytes\": %zu,\n", stats->rcvd_orig_bytes) != 0 ||
+	    cursor_emit(c, "  \"rcvd_bytes\": %zu,\n", stats->rcvd_bytes) != 0 ||
+	    cursor_emit(c, "  \"rcvd_packets\": %zu,\n", stats->rcvd_packets) != 0 ||
+	    cursor_emit(c, "  \"sent_orig_bytes\": %zu,\n", stats->sent_orig_bytes) != 0 ||
+	    cursor_emit(c, "  \"sent_bytes\": %zu,\n", stats->sent_bytes) != 0 ||
+	    cursor_emit(c, "  \"sent_packets\": %zu,\n", stats->sent_packets) != 0 ||
+	    cursor_emit(c, "  \"allocs_failed\": %zu,\n", stats->allocs_failed) != 0 ||
+	    cursor_emit(c, "  \"pkt_pool_hwm\": %zu,\n", stats->pkt_pool_hwm) != 0 ||
+	    cursor_emit(c, "  \"early_drops\": %zu,\n", stats->early_drops) != 0 ||
+	    cursor_emit(c, "  \"downs\": %zu,\n", info.tun_downs) != 0 ||
+	    cursor_emit_json_field(c, "  ", "version", str_or(stats->version, ""), false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "curve_name", str_or(stats->curve_name, ""),
+				   false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "cipher_suite", str_or(stats->cipher_suite, ""),
+				   true) != 0 ||
+	    cursor_emit(c, " }\n") != 0) {
+		return 1;
+	}
+
+	return 0;
 }
 
 size_t status_json(char *buf, size_t len)

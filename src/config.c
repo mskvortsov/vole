@@ -4,6 +4,7 @@
 LOG_MODULE_REGISTER(config, CONFIG_CONFIG_LOG_LEVEL);
 
 #include <zephyr/kernel.h>
+#include <zephyr/data/json.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/http/server.h>
 #include <zephyr/net/http/service.h>
@@ -14,8 +15,8 @@ LOG_MODULE_REGISTER(config, CONFIG_CONFIG_LOG_LEVEL);
 #include <tomlc17.h>
 
 #include "config.h"
-#include "status.h"
 #include "dtls.h"
+#include "status.h"
 
 #define SETTINGS_ROOT CONFIG_NET_HOSTNAME
 
@@ -45,6 +46,11 @@ static const uint8_t index_html_gz[] = {
 
 static char config_toml[HTTP_CONFIG_PAYLOAD_SIZE];
 static char http_post_report[HTTP_CONFIG_REPORT_SIZE];
+
+static const char resp_fmt[] = "{\n"
+			       " \"status\": %d,\n"
+			       " \"report\": \"%s\"\n"
+			       "}\n";
 
 typedef int (*storage_func_cb)(const char *name, const void *value, size_t val_len);
 
@@ -461,7 +467,9 @@ static int config_load_tun(struct config *c, toml_datum_t t)
 			return ret;
 		}
 	} else {
+		REPORT("cannot parse tun.proto %s: valid values are dtls or wireguard", proto);
 		c->tun.opts.proto = PROTO_UNKNOWN;
+		return 1;
 	}
 
 #if defined(CONFIG_NET_IPV6)
@@ -690,6 +698,39 @@ void config_apply(void)
 	}
 }
 
+static char *config_post_report_json(int status, size_t *body_len)
+{
+	size_t report_msg_len = strlen(http_post_report);
+	const size_t escaped_report_len = json_calc_escaped_len(http_post_report, report_msg_len);
+	char *escaped_report = k_malloc(escaped_report_len + 1);
+	char *report;
+
+	if (!escaped_report) {
+		LOG_ERR("cannot allocate a buffer for escaped json report");
+		return NULL;
+	}
+
+	const size_t report_len = sizeof(resp_fmt) + escaped_report_len + 16;
+	report = k_malloc(report_len);
+	if (!report) {
+		LOG_ERR("cannot allocate a buffer for json report");
+		k_free(escaped_report);
+		return NULL;
+	}
+
+	memcpy(escaped_report, http_post_report, report_msg_len + 1);
+	if (json_escape(escaped_report, &report_msg_len, escaped_report_len + 1) < 0) {
+		LOG_ERR("cannot escape json report");
+		k_free(escaped_report);
+		k_free(report);
+		return NULL;
+	}
+
+	*body_len = snprintf(report, report_len, resp_fmt, status, escaped_report);
+	k_free(escaped_report);
+	return report;
+}
+
 static int config_get_handler(enum http_transaction_status status,
 			      struct http_response_ctx *response_ctx)
 {
@@ -789,21 +830,10 @@ static int config_handler(struct http_client_ctx *client, enum http_transaction_
 		payload[payload_size] = '\0';
 
 		ret = config_load_new(payload, payload_size);
-
-		const char resp_fmt[] = "{\n"
-				" \"status\": %d,\n"
-				" \"report\": \"%s\"\n"
-			"}\n";
-
-		const size_t report_len = sizeof(resp_fmt) + sizeof(http_post_report);
-		report = k_malloc(report_len);
+		report = config_post_report_json(ret, &len);
 		if (report) {
-			/* TODO Escape http_post_report string */
-			len = snprintf(report, report_len, resp_fmt, ret, http_post_report);
 			response_ctx->body = report;
 			response_ctx->body_len = len;
-		} else {
-			LOG_ERR("cannot allocate a buffer for json report");
 		}
 
 		/* TODO Set Content-Type: application/json */

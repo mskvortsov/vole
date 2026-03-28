@@ -62,13 +62,16 @@ function convertRtt(us) {
 
 function showStatus(json) {
     json.sys.uptime = convertUptime(json.sys.uptime);
-    json.tun.cipher_suite = convertHyphens(json.tun.cipher_suite);
-    json.tun.rtt = convertRtt(json.tun.rtt);
+    if (json.tun.proto === 'dtls') {
+        json.tun.cipher_suite = convertHyphens(json.tun.cipher_suite);
+        json.tun.rtt = convertRtt(json.tun.rtt);
 
-    json.tun.sent_orig_bytes = convertBytes(json.tun.sent_orig_bytes);
-    json.tun.sent_bytes = convertBytes(json.tun.sent_bytes);
-    json.tun.rcvd_orig_bytes = convertBytes(json.tun.rcvd_orig_bytes);
-    json.tun.rcvd_bytes = convertBytes(json.tun.rcvd_bytes);
+        json.tun.sent_orig_bytes = convertBytes(json.tun.sent_orig_bytes);
+        json.tun.sent_bytes = convertBytes(json.tun.sent_bytes);
+        json.tun.rcvd_orig_bytes = convertBytes(json.tun.rcvd_orig_bytes);
+        json.tun.rcvd_bytes = convertBytes(json.tun.rcvd_bytes);
+    }
+    delete json.tun.proto;
 
     const table = document.getElementById('status-table');
     const tbody = document.createElement('tbody');

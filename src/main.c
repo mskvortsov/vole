@@ -129,6 +129,10 @@ static int tun_start(void)
 		 * Set a zero link address to satisfy the check.
 		 */
 		struct net_if *wg_ctrl = net_if_get_by_index(net_if_get_by_name("wg_ctrl"));
+		if (!wg_ctrl) {
+			LOG_ERR("cannot find wg_ctrl iface");
+			return -ENODEV;
+		}
 		net_if_set_link_addr(wg_ctrl, NULL, NET_LINK_ADDR_MAX_LENGTH, NET_LINK_UNKNOWN);
 
 		ret = wg_set_config(iface_tun, &cfg);
