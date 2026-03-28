@@ -207,6 +207,9 @@ static int status_wan_json(struct cursor *c)
 	struct net_if *iface = wan_get_iface();
 	struct cidr4_addr address = {0};
 	struct net_in_addr gateway = {0};
+	struct net_sockaddr_in netmask = {
+		.sin_family = NET_AF_INET,
+	};
 	struct wifi_iface_status status = {0};
 	char address_buf[NET_IPV4_ADDR_LEN + 4];
 	char gateway_buf[NET_IPV4_ADDR_LEN];
@@ -216,7 +219,13 @@ static int status_wan_json(struct cursor *c)
 	const struct net_if_addr_ipv4 *if_addr_ipv4 = &if_ipv4->unicast[0];
 	if (if_addr_ipv4->ipv4.addr_type == NET_ADDR_DHCP && if_addr_ipv4->ipv4.is_used) {
 		address.addr = if_addr_ipv4->ipv4.address.net_in_addr;
-		address.prefix = 32 - u32_count_leading_zeros(if_addr_ipv4->netmask.s_addr);
+		netmask.sin_addr = if_addr_ipv4->netmask;
+		ret = net_netmask_to_mask_len(NET_AF_INET, (struct net_sockaddr *)&netmask,
+					      &address.prefix);
+		if (ret != 0) {
+			LOG_WRN("cannot derive prefix length from wan netmask (%d)", ret);
+			address.prefix = 0;
+		}
 		gateway = if_ipv4->gw;
 	}
 
