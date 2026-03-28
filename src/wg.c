@@ -109,6 +109,7 @@ int wg_set_config(struct net_if *iface, const struct wg_interface_config *cfg)
 
 	if (peer_iface != iface) {
 		LOG_ERR("unexpected peer iface");
+		wireguard_peer_remove(ret);
 		return -EINVAL;
 	}
 

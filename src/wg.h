@@ -14,15 +14,11 @@ struct wg_interface_config {
 
 /**
  * Configure and start a WireGuard peer.
- *
- * Returns 0 on success, negative errno on failure.
  */
 int wg_set_config(struct net_if *iface, const struct wg_interface_config *cfg);
 
 /**
  * Initiate the WireGuard handshake with the configured peer.
- *
- * Returns 0 or -EAGAIN on success (handshake sent), negative errno on error.
  */
 int wg_initiate(void);
 
@@ -30,10 +26,5 @@ int wg_initiate(void);
  * Remove the active WireGuard peer and bring its interface down.
  */
 int wg_remove(void);
-
-/**
- * Sync the WireGuard TAI64N clock from an NTP server.
- */
-int wg_sntp_sync(void);
 
 #endif /* _WIREGUARD_H_ */
