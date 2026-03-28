@@ -485,6 +485,10 @@ static void dtls_input_negotiate(struct dtls_context *ctx, struct net_pkt *pkt)
 
 static enum net_verdict random_early_detection(size_t threshold)
 {
+       if (threshold == 0) {
+               return NET_OK;
+       }
+
        size_t free_blocks = k_mem_slab_num_free_get(&dtls_pkt_slab);
        if (free_blocks > threshold) {
                return NET_OK;
@@ -1040,18 +1044,17 @@ static int interface_stop(const struct device *dev)
 
 	LOG_DBG("stopping iface %d", net_if_get_by_iface(ctx->iface));
 
-	if (ctx->connected) {
-		/* Send a "close notify" alert to the peer. */
-		wolfSSL_shutdown(ctx->ssl);
-	} else {
-		LOG_DBG("not connected");
-	}
+	struct k_work_sync sync;
+	k_work_cancel_delayable_sync(&ctx->periodic_work, &sync);
 
 	/* No disconnection notification because stop is requested externally. */
 	dtls_close(ctx, false);
 
-	struct k_work_sync sync;
-	k_work_cancel_delayable_sync(&ctx->periodic_work, &sync);
+	if (ctx->ssl) {
+		k_mutex_lock(&ctx->ssl_lock, K_FOREVER);
+		wolfSSL_shutdown(ctx->ssl);
+		k_mutex_unlock(&ctx->ssl_lock);
+	}
 
 	wolfSSL_free(ctx->ssl);
 	wolfSSL_CTX_free(ctx->ssl_ctx);
