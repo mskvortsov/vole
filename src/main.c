@@ -423,6 +423,10 @@ int main(void)
 		if (ret != 0) {
 			fatal();
 		}
+		ret = config_init();
+		if (ret != 0) {
+			fatal();
+		}
 	}
 
 	aqm_init(NET_ETH_MAX_FRAME_SIZE);

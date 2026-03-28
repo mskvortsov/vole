@@ -32,6 +32,9 @@ struct config config;
 static struct config config_new;
 static bool config_new_pending;
 static struct k_mutex config_lock;
+static bool config_runtime_initialized;
+static bool reboot_count_updated;
+static bool http_server_started;
 
 static const uint8_t default_config_toml[] = {
 	#include "default.toml.inc"
@@ -956,16 +959,21 @@ HTTP_SERVER_CONTENT_TYPE(toml, "application/toml");
 int config_init()
 {
 	int ret;
-	ret = settings_subsys_init();
-	if (ret != 0) {
-		LOG_ERR("cannot init settings subsys (%d)", ret);
-		return ret;
-	}
+	if (!config_runtime_initialized) {
+		ret = settings_subsys_init();
+		if (ret != 0) {
+			LOG_ERR("cannot init settings subsys (%d)", ret);
+			return ret;
+		}
 
-	ret = settings_register(&settings_handler);
-	if (ret != 0) {
-		LOG_ERR("cannot register settings handlers (%d)", ret);
-		return ret;
+		ret = settings_register(&settings_handler);
+		if (ret != 0) {
+			LOG_ERR("cannot register settings handlers (%d)", ret);
+			return ret;
+		}
+
+		k_mutex_init(&config_lock);
+		config_runtime_initialized = true;
 	}
 
 	ret = settings_load();
@@ -974,11 +982,14 @@ int config_init()
 		return ret;
 	}
 
-	info.reboot_count += 1;
-	ret = settings_save();
-	if (ret != 0) {
-		LOG_ERR("cannot update reboot count (%d)", ret);
-		return ret;
+	if (!reboot_count_updated) {
+		info.reboot_count += 1;
+		ret = settings_save();
+		if (ret != 0) {
+			LOG_ERR("cannot update reboot count (%d)", ret);
+			return ret;
+		}
+		reboot_count_updated = true;
 	}
 
 	settings_print();
@@ -1001,15 +1012,16 @@ int config_init()
 
 	config_print();
 
-	k_mutex_init(&config_lock);
-
-	ret = http_server_start();
-	if (ret != 0) {
-		LOG_ERR("cannot start http server (%d)", ret);
-		return ret;
+	if (!http_server_started) {
+		ret = http_server_start();
+		if (ret != 0) {
+			LOG_ERR("cannot start http server (%d)", ret);
+			return ret;
+		}
+		http_server_started = true;
+		LOG_INF("http server started");
 	}
 
-	LOG_INF("http server started");
 	return 0;
 }
 

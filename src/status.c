@@ -205,6 +205,10 @@ static int status_lan_json(struct cursor *c)
 static int status_wan_json(struct cursor *c)
 {
 	struct net_if *iface = wan_get_iface();
+	if (!iface) {
+		return 0;
+	}
+
 	struct cidr4_addr address = {0};
 	struct net_in_addr gateway = {0};
 	struct net_sockaddr_in netmask = {
