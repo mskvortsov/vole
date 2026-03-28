@@ -10,6 +10,7 @@ manifest:
           - hal_espressif
           - mbedtls
           - picolibc
+          - tf-psa-crypto
 
     - name: wolfssl
       url: https://github.com/wolfSSL/wolfssl
