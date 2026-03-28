@@ -148,7 +148,11 @@ static void net_mgmt_event_handler(struct net_mgmt_event_callback *cb, uint64_t 
 			info.lan_num_connected += 1;
 		} else {
 			LOG_INF("station %s left", mac_str(sta_info->mac));
-			info.lan_num_connected -= 1;
+			if (info.lan_num_connected > 0) {
+				info.lan_num_connected -= 1;
+			} else {
+				LOG_WRN("got disconnect with zero lan client count");
+			}
 #if defined(CONFIG_NET_IPV6)
 			remove_sta_neighbors(sta_info->mac);
 #endif
@@ -212,6 +216,8 @@ int lan_start(void)
 	if (!iface_lan) {
 		return 0;
 	}
+
+	info.lan_num_connected = 0;
 
 #if defined(CONFIG_NET_IPV6)
 	struct net_in6_addr prefix;
@@ -324,6 +330,7 @@ int lan_stop(void)
 	}
 #endif
 
+	info.lan_num_connected = 0;
 	LOG_INF("lan stopped");
 	status_set(SUBSYS_LAN, STATUS_OFF);
 	return 0;
