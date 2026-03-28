@@ -571,6 +571,7 @@ static bool is_icmp_allowed(struct net_addr *addr)
 		LOG_DBG("created entry for %s", net_sprint_addr(addr->family, addr));
 		memcpy(&vacant->addr, addr, sizeof(struct net_addr));
 		vacant->denial_expires = sys_timepoint_calc(ICMP_RATE_LIMIT_TIMEOUT);
+		vacant->used = true;
 		k_mutex_unlock(&ctx.icmp_lock);
 		return true;
 	}
