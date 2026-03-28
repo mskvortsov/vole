@@ -682,7 +682,10 @@ static int config_load_new(const char *buf, size_t len)
 		REPORT("accepted and saved, reloading tun");
 		event_post(EVENT_CONF_TUN);
 	} else {
+		memcpy(&config, &config_new, sizeof(struct config));
 		REPORT("accepted and saved, nothing to reload");
+		config_new_pending = false;
+		k_mutex_unlock(&config_lock);
 	}
 
 	return 0;
@@ -893,6 +896,14 @@ static int status_handler(struct http_client_ctx *client, enum http_transaction_
 			return -ECONNRESET;
 		}
 		len = status_json(payload, HTTP_STATUS_PAYLOAD_SIZE - 1);
+		if (len == 0) {
+			LOG_ERR("cannot serialize status json into %d bytes", HTTP_STATUS_PAYLOAD_SIZE);
+			k_free(payload);
+			payload = NULL;
+			response_ctx->status = HTTP_500_INTERNAL_SERVER_ERROR;
+			response_ctx->final_chunk = true;
+			return -ECONNRESET;
+		}
 		response_ctx->body = payload;
 		response_ctx->body_len = len;
 		response_ctx->final_chunk = true;
