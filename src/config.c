@@ -17,6 +17,7 @@ LOG_MODULE_REGISTER(config, CONFIG_CONFIG_LOG_LEVEL);
 #include "config.h"
 #include "dtls.h"
 #include "status.h"
+#include "wifi.h"
 
 #define SETTINGS_ROOT CONFIG_NET_HOSTNAME
 
@@ -237,6 +238,35 @@ static int config_load_string(char *buf, size_t size, const char *key, const cha
 	return 0;
 }
 
+static int config_load_hwaddr(uint8_t *hwaddr, bool *hwaddr_set, const char *key, const char *hint,
+			      toml_datum_t t)
+{
+	toml_datum_t dat = toml_get(t, key);
+
+	if (dat.type == TOML_UNKNOWN) {
+		return 0;
+	}
+	if (dat.type != TOML_STRING) {
+		REPORT("%s has invalid type: must be a string", hint);
+		return 1;
+	}
+	if (net_bytes_from_str(hwaddr, WIFI_MAC_ADDR_LEN, dat.u.s) != 0) {
+		REPORT("cannot parse %s %s: valid format is xx:xx:xx:xx:xx:xx", hint, dat.u.s);
+		return 1;
+	}
+	if ((hwaddr[0] & 0x01) != 0) {
+		REPORT("cannot parse %s %s: multicast hwaddr is not allowed", hint, dat.u.s);
+		return 1;
+	}
+	if (memcmp(hwaddr, "\xff\xff\xff\xff\xff\xff", WIFI_MAC_ADDR_LEN) == 0) {
+		REPORT("cannot parse %s %s: broadcast hwaddr is not allowed", hint, dat.u.s);
+		return 1;
+	}
+
+	*hwaddr_set = true;
+	return 0;
+}
+
 struct int_result {
 	int val;
 	int ret;
@@ -357,6 +387,10 @@ static int config_load_wan(struct config *c, toml_datum_t t)
 		return ret;
 	}
 	ret = config_load_string(c->wan.psk, sizeof(c->wan.psk), "psk", "wan.psk", t);
+	if (ret != 0) {
+		return ret;
+	}
+	ret = config_load_hwaddr(c->wan.hwaddr, &c->wan.hwaddr_set, "hwaddr", "wan.hwaddr", t);
 	if (ret != 0) {
 		return ret;
 	}
@@ -581,7 +615,7 @@ static bool config_eq_lan(struct config *l, struct config *r)
 	       memcmp(&l->lan.dns6, &r->lan.dns6, sizeof(l->lan.dns6[0]) * l->lan.dns6_num) == 0;
 }
 
-static bool config_eq_wan(struct config *l, struct config *r)
+static bool config_eq_wan_conn(struct config *l, struct config *r)
 {
 	return strcmp(l->wan.ssid, r->wan.ssid) == 0 &&
 	       strcmp(l->wan.psk, r->wan.psk) == 0 &&
@@ -628,6 +662,9 @@ static void config_print(void)
 
 	LOG_DBG("%-16s: '%s'", "wan.ssid", config.wan.ssid);
 	LOG_DBG("%-16s: '%s'", "wan.psk", config.wan.psk);
+	if (config.wan.hwaddr_set) {
+		LOG_DBG("%-16s: '%s'", "wan.hwaddr", mac_str(config.wan.hwaddr));
+	}
 
 	LOG_DBG("%-16s: %s:%d", "tun.endpoint",
 		net_sprint_addr(NET_AF_INET, &config.tun.endpoint.sin_addr),
@@ -674,11 +711,13 @@ static int config_load_new(const char *buf, size_t len)
 
 	config_new_pending = true;
 
-	/* check for any actual change in parameters and make a cascading reload */
-	if (!config_eq_lan(&config, &config_new)) {
+	/* check for any actual change in parameters and make a reload */
+	if (!config_eq_lan(&config, &config_new) ||
+	    config.wan.hwaddr_set != config_new.wan.hwaddr_set ||
+	    memcmp(config.wan.hwaddr, config_new.wan.hwaddr, WIFI_MAC_ADDR_LEN) != 0) {
 		REPORT("accepted and saved, reloading lan, wan and tun");
 		event_post(EVENT_CONF_LAN);
-	} else if (!config_eq_wan(&config, &config_new)) {
+	} else if (!config_eq_wan_conn(&config, &config_new)) {
 		REPORT("accepted and saved, reloading wan and tun");
 		event_post(EVENT_CONF_WAN);
 	} else if (!config_eq_tun(&config, &config_new)) {

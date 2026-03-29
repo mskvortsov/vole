@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <zephyr/app_version.h>
 #include <zephyr/net/net_ip.h>
+#include <zephyr/net/wifi.h>
 #include <zephyr/sys/util_macro.h>
 
 #define VERSION_STRING "v" APP_VERSION_STRING "-" STRINGIFY(APP_BUILD_VERSION)
@@ -32,6 +33,8 @@ struct config_wan {
 	bool configured;
 	char ssid[33];
 	char psk[64];
+	uint8_t hwaddr[WIFI_MAC_ADDR_LEN];
+	bool hwaddr_set;
 	bool http;
 };
 

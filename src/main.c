@@ -477,7 +477,7 @@ int main(void)
 			gpio_pin_set_dt(&led_wan, 1);
 			lan_stop();
 			config_apply();
-			if (lan_start() == 0) {
+			if (wan_preconfigure() == 0 && lan_start() == 0) {
 				if (wan_start() == 0) {
 					gpio_pin_set_dt(&led_wan, 0);
 					if (tun_start() == 0) {

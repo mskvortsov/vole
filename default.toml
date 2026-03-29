@@ -10,6 +10,7 @@ dns6 = [ "2606:4700:4700::64", "2001:4860:4860::64" ]
 # [wan]
 # ssid = "name"
 # psk = "key"
+# hwaddr = "xx:xx:xx:xx:xx:xx"
 # http = false
 
 # [tun]

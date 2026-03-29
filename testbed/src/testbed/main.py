@@ -90,7 +90,7 @@ def main() -> None:
             proc.wait_sta_associated()
             proc.wait_slaac()
 
-            vole_wan_bssid = proc.get_status()["wan"]["bssid"]
+            vole_wan_bssid = proc.get_status()["wan"]["hwaddr"]
             stack.enter_context(proc.start_ap(vole_wan_bssid, output_dir))
 
             tcpdump_ap = net.start(

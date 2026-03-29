@@ -6,6 +6,7 @@
 int wifi_init(void);
 int lan_start(void);
 int lan_stop(void);
+int wan_preconfigure(void);
 int wan_start(void);
 int wan_stop(void);
 

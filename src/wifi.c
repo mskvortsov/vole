@@ -2,6 +2,7 @@
 LOG_MODULE_REGISTER(wifi, LOG_LEVEL_INF);
 
 #include <zephyr/init.h>
+#include <zephyr/net/ethernet_mgmt.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/drivers/gpio.h>
 
@@ -31,6 +32,7 @@ LOG_MODULE_REGISTER(wifi, LOG_LEVEL_INF);
 
 static struct net_if *iface_lan;
 static struct net_if *iface_wan;
+static uint8_t wan_hwaddr_orig[WIFI_MAC_ADDR_LEN];
 
 #if defined(CONFIG_NET_IPV6)
 static struct net_if_addr *lan_if_addr6;
@@ -194,6 +196,8 @@ int wifi_init(void)
 		return 1;
 	}
 
+	memcpy(wan_hwaddr_orig, net_if_get_link_addr(iface_wan)->addr, WIFI_MAC_ADDR_LEN);
+
 #if defined(CONFIG_VOLE_LAN)
 	iface_lan = net_if_get_wifi_sap();
 	if (!iface_lan) {
@@ -334,6 +338,47 @@ int lan_stop(void)
 	LOG_INF("lan stopped");
 	status_set(SUBSYS_LAN, STATUS_OFF);
 	return 0;
+}
+
+static int set_hwaddr(struct net_if *iface, const uint8_t *hwaddr)
+{
+	struct ethernet_req_params req = {0};
+	int ret, res;
+
+	if (memcmp(net_if_get_link_addr(iface)->addr, hwaddr, WIFI_MAC_ADDR_LEN) == 0) {
+		return 0;
+	}
+
+	memcpy(req.mac_address.addr, hwaddr, WIFI_MAC_ADDR_LEN);
+
+	ret = net_if_down(iface);
+	if (ret != 0) {
+		LOG_ERR("cannot bring iface down before setting mac: %s (%d)", strerror(-ret), ret);
+		return 1;
+	}
+
+	res = net_mgmt(NET_REQUEST_ETHERNET_SET_MAC_ADDRESS, iface, &req, sizeof(req));
+	if (res != 0) {
+		LOG_ERR("cannot set mac address: %s (%d)", strerror(-res), res);
+	}
+
+	ret = net_if_up(iface);
+	if (ret != 0) {
+		LOG_ERR("cannot bring wan iface up after setting mac: %s (%d)", strerror(-ret),
+			ret);
+		return 1;
+	}
+
+	return res;
+}
+
+int wan_preconfigure(void)
+{
+	if (config.wan.hwaddr_set) {
+		return set_hwaddr(iface_wan, config.wan.hwaddr);
+	}
+
+	return set_hwaddr(iface_wan, wan_hwaddr_orig);
 }
 
 int wan_start(void)

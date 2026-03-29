@@ -249,9 +249,9 @@ static int status_wan_json(struct cursor *c)
 #endif
 
 	if (cursor_emit(c, " \"wan\": {\n") != 0 ||
-	    cursor_emit_json_field(c, "  ", "bssid", mac_str(net_if_get_link_addr(iface)->addr),
+	    cursor_emit_json_field(c, "  ", "hwaddr", mac_str(net_if_get_link_addr(iface)->addr),
 				   false) != 0 ||
-	    cursor_emit_json_field(c, "  ", "ap_bssid", mac_str(status.bssid), false) != 0 ||
+	    cursor_emit_json_field(c, "  ", "bssid", mac_str(status.bssid), false) != 0 ||
 	    cursor_emit_json_field(c, "  ", "band", wifi_band_str(status.band), false) != 0 ||
 	    cursor_emit(c, "  \"channel\": %u,\n", status.channel) != 0 ||
 	    cursor_emit_json_field(c, "  ", "link_mode", wifi_link_mode_str(status.link_mode),
