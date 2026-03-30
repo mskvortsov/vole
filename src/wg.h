@@ -3,6 +3,7 @@
 
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
+#include <zephyr/net/wireguard.h>
 
 struct wg_interface_config {
 	struct net_sockaddr_in remote_address;
@@ -10,6 +11,7 @@ struct wg_interface_config {
 	const char *public_key_base64;
 	const char *psk_base64;
 	int keepalive_secs;
+	struct wireguard_amnezia_params awg;
 };
 
 /**

@@ -8,6 +8,7 @@ LOG_MODULE_REGISTER(config, CONFIG_CONFIG_LOG_LEVEL);
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/http/server.h>
 #include <zephyr/net/http/service.h>
+#include <zephyr/net/wireguard.h>
 #include <zephyr/settings/settings.h>
 
 #include "net_private.h"
@@ -267,6 +268,46 @@ static int config_load_hwaddr(uint8_t *hwaddr, bool *hwaddr_set, const char *key
 	return 0;
 }
 
+static int config_parse_u32(const char *str, uint32_t *val)
+{
+	char *endptr;
+	unsigned long n;
+
+	errno = 0;
+	n = strtoul(str, &endptr, 10);
+	if (errno == ERANGE || endptr == str || *endptr != '\0' || n > UINT32_MAX) {
+		return 1;
+	}
+
+	*val = (uint32_t)n;
+	return 0;
+}
+
+static int config_parse_u32_range(const char *str, uint32_t *min, uint32_t *max)
+{
+	char *sep;
+	int ret;
+
+	sep = strchr(str, '-');
+	if (!sep) {
+		ret = config_parse_u32(str, min);
+		if (ret != 0) {
+			return 1;
+		}
+		*max = *min;
+		return 0;
+	}
+
+	*sep = '\0';
+	ret = config_parse_u32(str, min);
+	*sep = '-';
+	if (ret != 0 || config_parse_u32(sep + 1, max) != 0 || *min > *max) {
+		return 1;
+	}
+
+	return 0;
+}
+
 struct int_result {
 	int val;
 	int ret;
@@ -406,9 +447,152 @@ static int config_load_wan(struct config *c, toml_datum_t t)
 	return 0;
 }
 
+static int config_load_tun_awg_h(struct config *c, toml_datum_t t)
+{
+	toml_datum_t awg_h = toml_get(t, "header-magic");
+	struct wireguard_amnezia_header *h = &c->tun.opts.u.wg.awg.header[0];
+
+	if (awg_h.type == TOML_UNKNOWN) {
+		memset(h, 0, sizeof(c->tun.opts.u.wg.awg.header));
+		return 0;
+	}
+	if (awg_h.type != TOML_ARRAY) {
+		REPORT("amnezia.header-magic has invalid type: must be an array");
+		return 1;
+	}
+	if (awg_h.u.arr.size != 4) {
+		REPORT("amnezia.header-magic must have exactly 4 elements");
+		return 1;
+	}
+
+	for (size_t i = 0; i < 4; ++i) {
+		toml_datum_t elem = awg_h.u.arr.elem[i];
+		if (elem.type != TOML_STRING) {
+			REPORT("amnezia.header-magic[%zu] has invalid type: must be a string", i);
+			return 1;
+		}
+		if (config_parse_u32_range(elem.u.s, &h[i].min, &h[i].max) != 0) {
+			REPORT("cannot parse amnezia.header-magic[%zu] %s: valid format is n or min-max",
+			       i, elem.u.s);
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static int config_load_tun_awg_s(struct config *c, toml_datum_t t)
+{
+	toml_datum_t awg_s = toml_get(t, "prefix-junk");
+	uint16_t *s = &c->tun.opts.u.wg.awg.junk_size[0];
+
+	if (awg_s.type == TOML_UNKNOWN) {
+		memset(s, 0, sizeof(c->tun.opts.u.wg.awg.junk_size));
+		return 0;
+	}
+	if (awg_s.type != TOML_ARRAY) {
+		REPORT("amnezia.prefix-junk has invalid type: must be an array");
+		return 1;
+	}
+	if (awg_s.u.arr.size != 4) {
+		REPORT("amnezia.prefix-junk must have exactly 4 elements");
+		return 1;
+	}
+
+	for (size_t i = 0; i < 4; ++i) {
+		toml_datum_t elem = awg_s.u.arr.elem[i];
+		if (elem.type != TOML_INT64) {
+			REPORT("amnezia.prefix-junk[%zu] has invalid type: must be an integer", i);
+			return 1;
+		}
+		if (elem.u.int64 < 0 || elem.u.int64 > UINT16_MAX) {
+			REPORT("invalid amnezia.prefix-junk[%zu] %lld: must be in range [0, %u]", i,
+			       elem.u.int64, UINT16_MAX);
+			return 1;
+		}
+		s[i] = elem.u.int64;
+	}
+
+	return 0;
+}
+
+static int config_load_tun_awg_j(struct config *c, toml_datum_t t)
+{
+	toml_datum_t awg_j = toml_get(t, "handshake-junk");
+	struct wireguard_amnezia_params *awg = &c->tun.opts.u.wg.awg;
+
+	if (awg_j.type == TOML_UNKNOWN) {
+		awg->jc = 0;
+		awg->jmin = 0;
+		awg->jmax = 0;
+		return 0;
+	}
+	if (awg_j.type != TOML_ARRAY) {
+		REPORT("amnezia.handshake-junk has invalid type: must be an array");
+		return 1;
+	}
+	if (awg_j.u.arr.size != 3) {
+		REPORT("amnezia.handshake-junk must have exactly 3 elements");
+		return 1;
+	}
+
+	toml_datum_t *elem = awg_j.u.arr.elem;
+	for (size_t i = 0; i < 3; ++i) {
+		if (elem[i].type != TOML_INT64) {
+			REPORT("amnezia.handshake-junk[%zu] has invalid type: must be an integer", i);
+			return 1;
+		}
+		if (elem[i].u.int64 < 0 || elem[i].u.int64 > UINT16_MAX) {
+			REPORT("invalid amnezia.handshake-junk[%zu] %lld: must be in range [0, %u]",
+			       i, elem[i].u.int64, UINT16_MAX);
+			return 1;
+		}
+	}
+
+	awg->jc = MIN(elem[0].u.int64, 12);
+	awg->jmin = MIN(elem[1].u.int64, NET_ETH_MTU);
+	awg->jmax = MIN(elem[2].u.int64, NET_ETH_MTU);
+
+	return 0;
+}
+
+static int config_load_tun_awg(struct config *c, toml_datum_t wg_t)
+{
+	struct wireguard_amnezia_params *awg = &c->tun.opts.u.wg.awg;
+	toml_datum_t amnezia = toml_get(wg_t, "amnezia");
+	int ret;
+
+	if (amnezia.type == TOML_UNKNOWN) {
+		memset(awg, 0, sizeof(*awg));
+		return 0;
+	}
+	if (amnezia.type != TOML_TABLE) {
+		REPORT("tun.wireguard.amnezia must be a table");
+		return 1;
+	}
+
+	awg->enabled = true;
+
+	ret = config_load_tun_awg_h(c, amnezia);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = config_load_tun_awg_s(c, amnezia);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = config_load_tun_awg_j(c, amnezia);
+	if (ret != 0) {
+		return ret;
+	}
+
+	return 0;
+}
+
 static int config_load_tun(struct config *c, toml_datum_t t)
 {
-	char proto[12];
 	struct int_result res;
 	int ret;
 	ret = config_load_endpoint(&c->tun.endpoint, t);
@@ -468,43 +652,56 @@ static int config_load_tun(struct config *c, toml_datum_t t)
 	}
 	c->tun.mtu = res.val;
 
-	ret = config_load_string(proto, sizeof(proto), "proto", "tun.proto", t);
-	if (ret != 0) {
-		return ret;
-	}
+	toml_datum_t dtls_t = toml_get(t, "dtls");
+	toml_datum_t wg_t = toml_get(t, "wireguard");
 
-	if (strcasecmp(proto, "dtls") == 0) {
+	if (dtls_t.type != TOML_UNKNOWN && wg_t.type != TOML_UNKNOWN) {
+		REPORT("tun must have either a dtls or wireguard subtable, not both");
+		return 1;
+	} else if (dtls_t.type != TOML_UNKNOWN) {
+		if (dtls_t.type != TOML_TABLE) {
+			REPORT("tun.dtls must be a table");
+			return 1;
+		}
 		c->tun.opts.proto = PROTO_DTLS;
 		ret = config_load_string(c->tun.opts.u.dtls.psk, sizeof(c->tun.opts.u.dtls.psk),
-					 "psk", "tun.psk", t);
+					 "psk", "tun.dtls.psk", dtls_t);
 		if (ret != 0) {
 			return ret;
 		}
 		ret = config_load_string(c->tun.opts.u.dtls.cipher_suite,
 					 sizeof(c->tun.opts.u.dtls.cipher_suite), "cipher_suite",
-					 "tun.cipher_suite", t);
+					 "tun.dtls.cipher_suite", dtls_t);
 		if (ret != 0) {
 			return ret;
 		}
 		if (!find_cipher_suite(c->tun.opts.u.dtls.cipher_suite)) {
-			REPORT("cannot parse tun.cipher_suite %s: invalid value",
+			REPORT("cannot parse tun.dtls.cipher_suite %s: invalid value",
 			       c->tun.opts.u.dtls.cipher_suite);
 			return 1;
 		}
-	} else if (strcasecmp(proto, "wireguard") == 0) {
+	} else if (wg_t.type != TOML_UNKNOWN) {
+		if (wg_t.type != TOML_TABLE) {
+			REPORT("tun.wireguard must be a table");
+			return 1;
+		}
 		c->tun.opts.proto = PROTO_WIREGUARD;
 		ret = config_load_string(c->tun.opts.u.wg.key, sizeof(c->tun.opts.u.wg.key), "key",
-					 "tun.key", t);
+					 "tun.wireguard.key", wg_t);
 		if (ret != 0) {
 			return ret;
 		}
 		ret = config_load_string(c->tun.opts.u.wg.pubkey, sizeof(c->tun.opts.u.wg.pubkey),
-					 "pubkey", "tun.pubkey", t);
+					 "pubkey", "tun.wireguard.pubkey", wg_t);
+		if (ret != 0) {
+			return ret;
+		}
+		ret = config_load_tun_awg(c, wg_t);
 		if (ret != 0) {
 			return ret;
 		}
 	} else {
-		REPORT("cannot parse tun.proto %s: valid values are dtls or wireguard", proto);
+		REPORT("tun must have a dtls or wireguard subtable");
 		c->tun.opts.proto = PROTO_UNKNOWN;
 		return 1;
 	}
@@ -632,7 +829,8 @@ static bool config_eq_tun_opts(struct config_tun_options *l, struct config_tun_o
 		       strcmp(l->u.dtls.psk, r->u.dtls.psk) == 0;
 	} else if (l->proto == PROTO_WIREGUARD) {
 		return strcmp(l->u.wg.key, r->u.wg.key) == 0 &&
-		       strcmp(l->u.wg.pubkey, r->u.wg.pubkey) == 0;
+		       strcmp(l->u.wg.pubkey, r->u.wg.pubkey) == 0 &&
+		       memcmp(&l->u.wg.awg, &r->u.wg.awg, sizeof(l->u.wg.awg)) == 0;
 	}
 	return false;
 }
@@ -671,13 +869,12 @@ static void config_print(void)
 		net_ntohs(config.tun.endpoint.sin_port));
 	LOG_DBG("%-16s: %d", "tun.local_port", config.tun.local_port);
 	if (config.tun.opts.proto == PROTO_DTLS) {
-		LOG_DBG("%-16s: '%s'", "tun.proto", "dtls");
-		LOG_DBG("%-16s: '%s'", "tun.cipher_suite", config.tun.opts.u.dtls.cipher_suite);
-		LOG_DBG("%-16s: '%s'", "tun.psk", config.tun.opts.u.dtls.psk);
+		LOG_DBG("%-24s: '%s'", "tun.dtls.cipher_suite", config.tun.opts.u.dtls.cipher_suite);
+		LOG_DBG("%-24s: '%s'", "tun.dtls.psk", config.tun.opts.u.dtls.psk);
 	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
-		LOG_DBG("%-16s: '%s'", "tun.proto", "wireguard");
-		LOG_DBG("%-16s: '%s'", "tun.key", config.tun.opts.u.wg.key);
-		LOG_DBG("%-16s: '%s'", "tun.pubkey", config.tun.opts.u.wg.pubkey);
+		LOG_DBG("%-24s: '%s'", "tun.wireguard.key", config.tun.opts.u.wg.key);
+		LOG_DBG("%-24s: '%s'", "tun.wireguard.pubkey", config.tun.opts.u.wg.pubkey);
+		LOG_DBG("%-24s: %d", "tun.wireguard.amnezia", config.tun.opts.u.wg.awg.enabled);
 	}
 	LOG_DBG("%-16s: %zu", "tun.keepalive", config.tun.keepalive_secs);
 	LOG_DBG("%-16s: %d", "tun.mtu", config.tun.mtu);
@@ -855,7 +1052,8 @@ static int config_handler(struct http_client_ctx *client, enum http_transaction_
 				return -ECONNRESET;
 			}
 		}
-		if (payload_size + request_ctx->data_len > HTTP_CONFIG_PAYLOAD_SIZE - 1) {
+		/* two bytes are reserved for a trailing newline and a null-terminator */
+		if (payload_size + request_ctx->data_len > HTTP_CONFIG_PAYLOAD_SIZE - 2) {
 			LOG_DBG("cannot append fragment size %zu", request_ctx->data_len);
 			response_ctx->status = HTTP_413_PAYLOAD_TOO_LARGE;
 			return -ECONNRESET;
@@ -871,7 +1069,10 @@ static int config_handler(struct http_client_ctx *client, enum http_transaction_
 		}
 
 		LOG_DBG("final fragment received");
-		/* tomlc17 expects a null-terminated input */
+		/* tomlc17 expects a null-terminated input; also add a trailing newline */
+		if (payload_size == 0 || payload[payload_size - 1] != '\n') {
+			payload[payload_size++] = '\n';
+		}
 		payload[payload_size] = '\0';
 
 		ret = config_load_new(payload, payload_size);

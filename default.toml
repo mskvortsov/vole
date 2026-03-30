@@ -23,12 +23,22 @@ dns6 = [ "2606:4700:4700::64", "2001:4860:4860::64" ]
 # peer6 = "fdf7:fa8:ed0c:ffff::1"
 # keepalive = 15
 
-# proto = "dtls"
+# [tun.dtls]
 # cipher_suite = "tls13-aes128-ccm-8-sha256"
 # cipher_suite = "tls13-chacha20-poly1305-sha256"
 # cipher_suite = "tls13-sha256-sha256"
 # psk = "AAAAAAAAAAAAAAAAAAAAAA=="
 
-# proto = "wireguard"
-# key = "<device private key>"
-# pubkey = "<server public key>"
+# [tun.wireguard]
+# key    = "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk="
+# pubkey = "ppppppppppppppppppppppppppppppppppppppppppp="
+
+# [tun.wireguard.amnezia]
+# header-magic = [
+#   "1000000-1999999",
+#   "2000000-2999999",
+#   "3000000-3999999",
+#   "4000000-9999999",
+# ]
+# prefix-junk = [ 36, 93, 9, 6 ],
+# handshake-junk = [ 5, 64, 1400 ],

@@ -108,6 +108,7 @@ static int tun_start(void)
 		}
 	} else if (config.tun.opts.proto == PROTO_WIREGUARD) {
 		struct wg_interface_config cfg = {
+			.awg = config.tun.opts.u.wg.awg,
 			.remote_address = config.tun.endpoint,
 			.private_key_base64 = config.tun.opts.u.wg.key,
 			.public_key_base64 = config.tun.opts.u.wg.pubkey,

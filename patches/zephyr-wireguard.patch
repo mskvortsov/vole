@@ -1,28 +1,43 @@
-diff --git a/subsys/net/lib/wireguard/ns_rtc.c b/subsys/net/lib/wireguard/ns_rtc.c
-index abcc580e464..5b04675885b 100644
---- a/subsys/net/lib/wireguard/ns_rtc.c
-+++ b/subsys/net/lib/wireguard/ns_rtc.c
-@@ -11,6 +11,7 @@ LOG_MODULE_DECLARE(wireguard, CONFIG_WIREGUARD_LOG_LEVEL);
+diff --git a/include/zephyr/net/wireguard.h b/include/zephyr/net/wireguard.h
+index cc5bc2b0e40..c0a9429c736 100644
+--- a/include/zephyr/net/wireguard.h
++++ b/include/zephyr/net/wireguard.h
+@@ -59,6 +59,21 @@ struct wireguard_allowed_ip {
+ 	bool is_valid : 1;
+ };
  
- #include <zephyr/kernel.h>
- #include <zephyr/net/net_core.h>
-+#include <zephyr/net/net_log.h>
- #include <zephyr/net/wireguard.h>
- #include <zephyr/net/net_log.h>
++/**
++ * AmneziaWG obfuscation parameters.
++ */
++struct wireguard_amnezia_params {
++	bool enabled;
++	struct wireguard_amnezia_header {
++		uint32_t min;
++		uint32_t max;
++	} header[4];
++	uint16_t junk_size[4];
++	uint16_t jc;
++	uint16_t jmin;
++	uint16_t jmax;
++};
++
+ /**
+  * @brief Wireguard peer configuration information.
+  *
+@@ -86,6 +101,8 @@ struct wireguard_peer_config {
+ 	 * Set to 0 to use the default value.
+ 	 */
+ 	int keepalive_interval;
++
++	struct wireguard_amnezia_params awg;
+ };
  
+ /** Wireguard VPN statistics */
 diff --git a/subsys/net/lib/wireguard/wg.c b/subsys/net/lib/wireguard/wg.c
-index 484b7c79963..8ac12fdf0f8 100644
+index 484b7c79963..36e6a3789b8 100644
 --- a/subsys/net/lib/wireguard/wg.c
 +++ b/subsys/net/lib/wireguard/wg.c
-@@ -19,6 +19,7 @@ LOG_MODULE_REGISTER(wireguard, CONFIG_WIREGUARD_LOG_LEVEL);
- #include <zephyr/net/net_pkt.h>
- #include <zephyr/net/net_ip.h>
- #include <zephyr/net/net_if.h>
-+#include <zephyr/net/net_log.h>
- #include <zephyr/net/net_mgmt.h>
- #include <zephyr/net/net_event.h>
- #include <zephyr/net/dummy.h>
-@@ -65,7 +66,11 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt);
+@@ -65,7 +65,11 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt);
  #define WG_TIMER_PERIOD 500 /* ms */
  
  #define WG_BUF_COUNT CONFIG_WIREGUARD_BUF_COUNT
@@ -34,17 +49,187 @@ index 484b7c79963..8ac12fdf0f8 100644
  
  #define WG_DEFAULT_PORT 51820
  
-@@ -887,6 +892,9 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+@@ -138,7 +142,8 @@ static int create_packet(struct net_if *iface,
+ 			 size_t packet_len,
+ 			 uint8_t dscp,
+ 			 uint8_t ecn,
+-			 struct net_pkt **pkt);
++			 struct net_pkt **pkt,
++			 size_t junk_len);
+ 
+ static enum net_verdict wg_input(struct net_conn *conn,
+ 				 struct net_pkt *pkt,
+@@ -764,6 +769,40 @@ static struct wg_peer *peer_lookup_by_virtual_iface(struct net_if *iface)
+ 	return NULL;
+ }
+ 
++/*
++ * wg_resolve_msg_type - map a raw 4-byte type value to a canonical MESSAGE_x.
++ *
++ * In standard mode the type must exactly equal one of the four defined values.
++ * In AmneziaWG mode each message type is represented by a configured range
++ * [min, max]; the raw value is accepted if it falls within that range.
++ *
++ * Returns MESSAGE_INVALID (0) if the value matches no known type.
++ */
++static int wg_resolve_msg_type(const struct wg_peer *peer, uint32_t raw_type)
++{
++	if (!peer->awg.enabled) {
++		/* Standard mode: upper 3 bytes must be zero (reserved), low
++		 * byte carries the type (1-4).
++		 */
++		if (raw_type == MESSAGE_HANDSHAKE_INITIATION ||
++		    raw_type == MESSAGE_HANDSHAKE_RESPONSE   ||
++		    raw_type == MESSAGE_COOKIE_REPLY         ||
++		    raw_type == MESSAGE_TRANSPORT_DATA) {
++			return (int)raw_type;
++		}
++		return MESSAGE_INVALID;
++	}
++
++	/* AmneziaWG mode: check each range in order. */
++	for (int i = 0; i < 4; i++) {
++		if (raw_type >= peer->awg.header[i].min &&
++		    raw_type <= peer->awg.header[i].max) {
++			return i + 1; /* MESSAGE_x = index + 1 */
++		}
++	}
++	return MESSAGE_INVALID;
++}
++
+ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ {
+ 	NET_PKT_DATA_ACCESS_DEFINE(wg_access, struct wg_msg_hdr);
+@@ -777,6 +816,7 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ 	struct wg_msg_hdr *hdr;
+ 	struct wg_peer *peer;
+ 	size_t len, hdr_len;
++	uint32_t msg_type;
+ 	int ret;
+ 
+ 	if (pkt->buffer == NULL) {
+@@ -847,12 +887,6 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ 		goto drop;
+ 	}
+ 
+-	if (!(hdr->reserved[0] == 0 && hdr->reserved[1] == 0 &&
+-	      hdr->reserved[2] == 0)) {
+-		NET_DBG("DROP: Invalid Wireguard header");
+-		goto drop;
+-	}
+-
+ 	/* At this point we don't know if this came from a valid peer */
+ 	peer = peer_lookup_by_virtual_iface(iface);
+ 	if (peer == NULL) {
+@@ -866,7 +900,60 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ 		goto drop;
+ 	}
+ 
+-	if (hdr->type == MESSAGE_HANDSHAKE_INITIATION) {
++	/* AmneziaWG: strip the junk prefix from incoming messages.
++	 *
++	 * The remote peer prepends junk_size[i] random bytes before each
++	 * message type i.  We match the UDP payload length against
++	 * (junk_size[i] + known_message_size[i]) to determine the junk
++	 * prefix length, then advance the cursor past it and re-read the
++	 * type field from the actual WireGuard message header.
++	 */
++	if (peer->awg.enabled) {
++		static const uint16_t msg_fixed_sizes[] = {
++			sizeof(struct msg_handshake_init),     /* INIT   */
++			sizeof(struct msg_handshake_response), /* RESP   */
++			sizeof(struct msg_cookie_reply),       /* COOKIE */
++		};
++		uint16_t payload_len = (uint16_t)(len - hdr_len);
++		uint16_t junk_skip = 0;
++
++		for (int j = 0; j < 3; j++) {
++			if (peer->awg.junk_size[j] > 0 &&
++			    payload_len == peer->awg.junk_size[j] + msg_fixed_sizes[j]) {
++				junk_skip = peer->awg.junk_size[j];
++				break;
++			}
++		}
++
++		/* Transport DATA: variable size, at least type+receiver+counter */
++		if (junk_skip == 0 && peer->awg.junk_size[MESSAGE_TRANSPORT_DATA - 1] > 0 &&
++		    payload_len > peer->awg.junk_size[MESSAGE_TRANSPORT_DATA - 1] +
++				  sizeof(struct msg_transport_data)) {
++			junk_skip = peer->awg.junk_size[MESSAGE_TRANSPORT_DATA - 1];
++		}
++
++		if (junk_skip > 0) {
++			net_pkt_skip(pkt, junk_skip);
++			hdr = (struct wg_msg_hdr *)net_pkt_get_data(pkt, &wg_access);
++			if (!hdr) {
++				NET_DBG("DROP: NULL WireGuard header after AWG junk skip");
++				goto drop;
++			}
++			hdr_len += junk_skip;
++		}
++	}
++
++	/* In standard mode the upper 3 bytes of the type field must be zero.
++	 * In AmneziaWG mode those bytes carry part of the magic header value
++	 * and must not be checked.
++	 */
++	if (!peer->awg.enabled && (hdr->type >> 8) != 0) {
++		NET_DBG("DROP: Invalid Wireguard header");
++		goto drop;
++	}
++
++	msg_type = wg_resolve_msg_type(peer, hdr->type);
++	if (msg_type == MESSAGE_HANDSHAKE_INITIATION) {
+ 		ret = handle_handshake_init(peer, addr, my_addr, pkt);
+ 		if (ret < 0) {
+ 			NET_DBG("DROP: Invalid %s Wireguard header (%d)",
+@@ -880,21 +967,23 @@ static enum net_verdict wg_ctrl_recv(struct net_if *iface, struct net_pkt *pkt)
+ 			NET_DBG("Cannot schedule %s work (%d)", "periodic", ret);
+ 		}
+ 
+-	} else if (hdr->type == MESSAGE_HANDSHAKE_RESPONSE) {
++	} else if (msg_type == MESSAGE_HANDSHAKE_RESPONSE) {
+ 		ret = handle_handshake_response(peer, addr, my_addr, pkt);
+ 		if (ret < 0) {
+ 			NET_DBG("DROP: Invalid %s Wireguard header (%d)",
  				"handshake response", ret);
  			goto drop;
  		}
-+
+-	} else if (hdr->type == MESSAGE_COOKIE_REPLY) {
 +		net_mgmt_event_notify(NET_EVENT_VPN_CONNECTED, peer->iface);
 +
- 	} else if (hdr->type == MESSAGE_COOKIE_REPLY) {
++	} else if (msg_type == MESSAGE_COOKIE_REPLY) {
  		ret = handle_cookie_reply(peer, addr, pkt);
  		if (ret < 0) {
-@@ -1310,10 +1318,12 @@ static enum net_verdict interface_recv(struct net_if *iface,
+ 			NET_DBG("DROP: Invalid %s Wireguard header (%d)",
+ 				"cookie reply", ret);
+ 			goto drop;
+ 		}
+-	} else if (hdr->type == MESSAGE_TRANSPORT_DATA) {
++	} else if (msg_type == MESSAGE_TRANSPORT_DATA) {
+ 		ret = handle_transport_data(peer, addr, pkt, hdr_len, len - hdr_len);
+ 		if (ret < 0) {
+ 			NET_DBG("DROP: Invalid %s Wireguard header (%d)",
+@@ -1158,7 +1247,7 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt)
+ 
+ 	memset(buf->data, 0, buf->size);
+ 
+-	hdr.type = MESSAGE_TRANSPORT_DATA;
++	hdr.type = awg_gen_type(peer, MESSAGE_TRANSPORT_DATA);
+ 	hdr.receiver = keypair->remote_index;
+ 	sys_put_le64(keypair->sending_counter, (uint8_t *)&hdr.counter);
+ 
+@@ -1243,7 +1332,8 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt)
+ 	/* Create a new packet and send it to the control interface */
+ 	ret = create_packet(iface, net_sad(&src_addr), net_sad(&peer->endpoint),
+ 			    buf->data, sizeof(hdr) + padded_len + WG_AUTHTAG_LEN,
+-			    0, 0, &pkt_encrypted);
++			    0, 0, &pkt_encrypted,
++			    peer->awg.enabled ? peer->awg.junk_size[MESSAGE_TRANSPORT_DATA - 1] : 0);
+ 
+ 	/* We do not need the temp buffer any more */
+ 	net_buf_unref(buf);
+@@ -1310,10 +1400,12 @@ static enum net_verdict interface_recv(struct net_if *iface,
  
  	if (IS_ENABLED(CONFIG_NET_IPV6) && vtc_vhl == 0x60) {
  		net_pkt_set_family(pkt, NET_AF_INET6);
@@ -57,7 +242,192 @@ index 484b7c79963..8ac12fdf0f8 100644
  		return net_ipv4_input(pkt);
  	}
  
-@@ -1895,6 +1905,11 @@ static void iface_cb(struct net_if *iface, void *user_data)
+@@ -1441,13 +1533,14 @@ static int create_ipv4_packet(struct net_if *iface,
+ 			      size_t packet_len,
+ 			      uint8_t dscp,
+ 			      uint8_t ecn,
+-			      struct net_pkt **reply_pkt)
++			      struct net_pkt **reply_pkt,
++			      size_t junk_len)
+ {
+ 	struct net_pkt *pkt;
+ 	int ret;
+ 
+ 	pkt = net_pkt_alloc_with_buffer(iface,
+-					NET_UDPH_LEN + packet_len,
++					NET_UDPH_LEN + packet_len + junk_len,
+ 					NET_AF_INET, NET_IPPROTO_UDP,
+ 					PKT_ALLOC_WAIT_TIME);
+ 	if (pkt == NULL) {
+@@ -1477,13 +1570,14 @@ static int create_ipv6_packet(struct net_if *iface,
+ 			      struct net_sockaddr *dst,
+ 			      uint8_t *packet,
+ 			      size_t packet_len,
+-			      struct net_pkt **reply_pkt)
++			      struct net_pkt **reply_pkt,
++			      size_t junk_len)
+ {
+ 	struct net_pkt *pkt;
+ 	int ret;
+ 
+ 	pkt = net_pkt_alloc_with_buffer(iface,
+-					NET_UDPH_LEN + packet_len,
++					NET_UDPH_LEN + packet_len + junk_len,
+ 					NET_AF_INET6, NET_IPPROTO_UDP,
+ 					PKT_ALLOC_WAIT_TIME);
+ 	if (pkt == NULL) {
+@@ -1511,7 +1605,8 @@ static int create_packet(struct net_if *iface,
+ 			 size_t packet_len,
+ 			 uint8_t dscp,
+ 			 uint8_t ecn,
+-			 struct net_pkt **pkt)
++			 struct net_pkt **pkt,
++			 size_t junk_len)
+ {
+ 	int ret;
+ 
+@@ -1523,7 +1618,8 @@ static int create_packet(struct net_if *iface,
+ 					 packet_len,
+ 					 dscp,
+ 					 ecn,
+-					 pkt);
++					 pkt,
++					 junk_len);
+ 
+ 	} else if (IS_ENABLED(CONFIG_NET_IPV6) && dst->sa_family == NET_AF_INET6) {
+ 		ret = create_ipv6_packet(iface,
+@@ -1531,7 +1627,8 @@ static int create_packet(struct net_if *iface,
+ 					 dst,
+ 					 packet,
+ 					 packet_len,
+-					 pkt);
++					 pkt,
++					 junk_len);
+ 	} else {
+ 		ret = -ENOTSUP;
+ 		goto out;
+@@ -1549,6 +1646,22 @@ static int create_packet(struct net_if *iface,
+ 		goto out;
+ 	}
+ 
++	/* AmneziaWG: prepend random junk bytes at the start of the UDP payload. The server strips
++	 * exactly junk_len bytes from the front before validating the type field.
++	 */
++	if (junk_len > 0) {
++		uint8_t scratch[64];
++		size_t remaining = junk_len;
++
++		while (remaining > 0) {
++			size_t chunk = MIN(remaining, sizeof(scratch));
++
++			sys_rand_get(scratch, chunk);
++			net_pkt_write(*pkt, scratch, chunk);
++			remaining -= chunk;
++		}
++	}
++
+ 	if (packet_len > 0) {
+ 		net_pkt_write(*pkt, packet, packet_len);
+ 	}
+@@ -1581,6 +1694,63 @@ static int send_data(struct wg_iface_context *ctx, struct net_pkt *pkt)
+ 			   ctx->attached_to, pkt);
+ }
+ 
++/* AmneziaWG: send Jc random UDP packets before the handshake initiation.
++ * Each packet has a random payload of size in [jmin, jmax] bytes.
++ * Uses create_packet with no structured payload — all bytes are junk.
++ */
++static void awg_send_junk_packets(struct wg_iface_context *ctx,
++				  struct net_if *target_iface,
++				  struct net_sockaddr *src,
++				  struct wg_peer *peer)
++{
++	if (!peer->awg.enabled || peer->awg.jc == 0) {
++		return;
++	}
++
++	uint16_t jmin = peer->awg.jmin;
++	uint16_t jmax = peer->awg.jmax;
++
++	if (jmin == 0) {
++		jmin = 1;
++	}
++	if (jmax < jmin) {
++		jmax = jmin;
++	}
++
++	for (uint8_t i = 0; i < peer->awg.jc; i++) {
++		struct net_pkt *pkt = NULL;
++		uint16_t junk_len;
++		int ret;
++
++		/* Random size in [jmin, jmax] */
++		if (jmax > jmin) {
++			junk_len = jmin + (uint16_t)(sys_rand32_get() % (jmax - jmin + 1));
++		} else {
++			junk_len = jmin;
++		}
++
++		ret = create_packet(target_iface, src, net_sad(&peer->endpoint),
++				    NULL, 0, 0, 0, &pkt, junk_len);
++		if (ret < 0 || pkt == NULL) {
++			NET_DBG("AWG junk pkt %u/%u alloc failed (%d)", i + 1,
++				peer->awg.jc, ret);
++			continue;
++		}
++
++		net_pkt_set_vpn_iface(pkt, target_iface);
++		net_pkt_set_iface(pkt, target_iface);
++
++		ret = send_data(ctx, pkt);
++		if (ret < 0) {
++			NET_DBG("AWG junk pkt %u/%u send failed (%d)", i + 1,
++				peer->awg.jc, ret);
++			net_pkt_unref(pkt);
++		}
++	}
++
++	NET_DBG("AWG: sent %u junk packets before handshake init", peer->awg.jc);
++}
++
+ static int wg_send_handshake_init(struct wg_iface_context *ctx,
+ 				  struct net_if *iface,
+ 				  struct wg_peer *peer,
+@@ -1604,8 +1774,12 @@ static int wg_send_handshake_init(struct wg_iface_context *ctx,
+ 		target_iface = net_if_get_default();
+ 	}
+ 
++	/* AmneziaWG: send Jc random junk packets before the INIT */
++	awg_send_junk_packets(ctx, target_iface, addr, peer);
++
+ 	ret = create_packet(target_iface, addr, net_sad(&peer->endpoint), (uint8_t *)packet,
+-			    sizeof(*packet), NET_IPV4_DSCP_AF41, 0, &pkt);
++			    sizeof(*packet), NET_IPV4_DSCP_AF41, 0, &pkt,
++			    peer->awg.enabled ? peer->awg.junk_size[MESSAGE_HANDSHAKE_INITIATION - 1] : 0);
+ 	if (ret < 0) {
+ 		NET_DBG("Packet creation failed (%d)", ret);
+ 		vpn_stats_update_alloc_failed(ctx);
+@@ -1658,7 +1832,8 @@ static void wg_send_handshake_response(struct wg_iface_context *ctx,
+ 	}
+ 
+ 	ret = create_packet(iface, my_addr, net_sad(&peer->endpoint), (uint8_t *)&packet,
+-			    sizeof(packet), NET_IPV4_DSCP_AF41, 0, &pkt);
++			    sizeof(packet), NET_IPV4_DSCP_AF41, 0, &pkt,
++			    peer->awg.enabled ? peer->awg.junk_size[MESSAGE_HANDSHAKE_RESPONSE - 1] : 0);
+ 	if (ret < 0) {
+ 		NET_DBG("Packet creation failed (%d)", ret);
+ 		vpn_stats_update_alloc_failed(ctx);
+@@ -1712,7 +1887,8 @@ static void wg_send_handshake_cookie(struct wg_iface_context *ctx,
+ 
+ 	ret = create_packet(ctx->wg_ctx->iface, addr, net_sad(&ctx->peer->endpoint),
+ 			    (uint8_t *)&packet, sizeof(packet), NET_IPV4_DSCP_AF41, 0,
+-			    &pkt);
++			    &pkt,
++			    ctx->peer->awg.enabled ? ctx->peer->awg.junk_size[MESSAGE_COOKIE_REPLY - 1] : 0);
+ 	if (ret < 0) {
+ 		NET_DBG("Packet creation failed (%d)", ret);
+ 		vpn_stats_update_alloc_failed(ctx);
+@@ -1895,6 +2071,11 @@ static void iface_cb(struct net_if *iface, void *user_data)
  		return;
  	}
  
@@ -69,7 +439,7 @@ index 484b7c79963..8ac12fdf0f8 100644
  	/* Ignore already attached interfaces */
  	if (net_virtual_get_iface(iface) != NULL) {
  		return;
-@@ -2052,6 +2067,13 @@ int wireguard_peer_add(struct wireguard_peer_config *peer_config,
+@@ -2052,6 +2233,13 @@ int wireguard_peer_add(struct wireguard_peer_config *peer_config,
  		net_sin(net_sad(&peer->cfg_endpoint))->sin_port = net_htons(WG_DEFAULT_PORT);
  	}
  
@@ -83,10 +453,39 @@ index 484b7c79963..8ac12fdf0f8 100644
  	peer->id = ++id;
  	peer->iface = iface;
  	*peer_iface = peer->iface;
+@@ -2067,6 +2255,10 @@ int wireguard_peer_add(struct wireguard_peer_config *peer_config,
+ 		peer->keepalive_interval = 0;
+ 	}
+ 
++	if (peer_config->awg.enabled) {
++		peer->awg = peer_config->awg;
++	}
++
+ 	sys_slist_prepend(&active_peers, node);
+ 
+ 	net_if_up(peer->iface);
 diff --git a/subsys/net/lib/wireguard/wg_crypto.c b/subsys/net/lib/wireguard/wg_crypto.c
-index bfab573437a..65f6dff09f9 100644
+index bfab573437a..427f9e0ace7 100644
 --- a/subsys/net/lib/wireguard/wg_crypto.c
 +++ b/subsys/net/lib/wireguard/wg_crypto.c
+@@ -903,7 +903,7 @@ static bool wg_create_handshake_init(struct wg_iface_context *ctx,
+ 	/* Hi := Hash(Hi || msg.timestamp) */
+ 	wg_mix_hash(handshake->hash, dst->enc_timestamp, sizeof(dst->enc_timestamp));
+ 
+-	dst->type = MESSAGE_HANDSHAKE_INITIATION;
++	dst->type = awg_gen_type(peer, MESSAGE_HANDSHAKE_INITIATION);
+ 
+ 	dst->sender = generate_unique_index(ctx);
+ 
+@@ -1049,7 +1049,7 @@ static bool wg_create_handshake_response(struct wg_iface_context *ctx,
+ 	wg_psa_aead_encrypt(dst->enc_empty, NULL, 0,
+ 			    handshake->hash, WG_HASH_LEN, 0, key);
+ 
+-	dst->type = MESSAGE_HANDSHAKE_RESPONSE;
++	dst->type = awg_gen_type(peer, MESSAGE_HANDSHAKE_RESPONSE);
+ 	dst->sender = generate_unique_index(ctx);
+ 	dst->receiver = handshake->remote_index;
+ 
 @@ -1343,6 +1343,10 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
  		return -ENOMEM;
  	}
@@ -98,14 +497,11 @@ index bfab573437a..65f6dff09f9 100644
  	copied = net_buf_linearize(buf->data, data_len, pkt->buffer,
  				   ip_udp_hdr_len + sizeof(struct msg_transport_data),
  				   data_len);
-@@ -1461,6 +1465,15 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
+@@ -1461,6 +1465,12 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
  				continue;
  			}
  
-+			/* mask_len == 0 means 0.0.0.0/0 — allow all.
-+			 * Skip the shift (UINT32_MAX << 32 is UB; on RV32 it
-+			 * wraps to UINT32_MAX, making the check always false).
-+			 */
++			/* 0.0.0.0/0 — allow all */
 +			if (peer->allowed_ip[i].mask_len == 0) {
 +				addr_found = true;
 +				break;
@@ -114,3 +510,105 @@ index bfab573437a..65f6dff09f9 100644
  			src.s_addr = sys_get_be32(
  				(const uint8_t *)&NET_IPV4_HDR(pkt_decrypted)->src);
  			subnet = UINT32_MAX << (32 - peer->allowed_ip[i].mask_len);
+diff --git a/subsys/net/lib/wireguard/wg_internal.h b/subsys/net/lib/wireguard/wg_internal.h
+index 42e592a494e..381e0f1e854 100644
+--- a/subsys/net/lib/wireguard/wg_internal.h
++++ b/subsys/net/lib/wireguard/wg_internal.h
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <zephyr/net/wireguard.h>
+ #include <psa/crypto.h>
+ 
+ /* tai64n contains 64-bit seconds and 32-bit nano offset (12 bytes) */
+@@ -52,10 +53,15 @@
+ 
+ #define WG_MTU 1420U
+ 
+-/* 5.4.2 First Message: Initiator to Responder */
++/* 5.4.2 First Message: Initiator to Responder
++ *
++ * The type field occupies the first 4 bytes of every WireGuard message
++ * (RFC: 1-byte type + 3 reserved zero bytes).  AmneziaWG uses all 32 bits
++ * as a random "magic header" value, so we store the whole field as uint32_t.
++ * The wire layout is unchanged: 4 bytes little-endian at offset 0.
++ */
+ struct msg_handshake_init {
+-	uint8_t type;
+-	uint8_t reserved[3];
++	uint32_t type;
+ 	uint32_t sender;
+ 	uint8_t ephemeral[32];
+ 	uint8_t enc_static[32 + WG_AUTHTAG_LEN];
+@@ -66,8 +72,7 @@ struct msg_handshake_init {
+ 
+ /* 5.4.3 Second Message: Responder to Initiator */
+ struct msg_handshake_response {
+-	uint8_t type;
+-	uint8_t reserved[3];
++	uint32_t type;
+ 	uint32_t sender;
+ 	uint32_t receiver;
+ 	uint8_t ephemeral[32];
+@@ -78,8 +83,7 @@ struct msg_handshake_response {
+ 
+ /* 5.4.7 Under Load: Cookie Reply Message */
+ struct msg_cookie_reply {
+-	uint8_t type;
+-	uint8_t reserved[3];
++	uint32_t type;
+ 	uint32_t receiver;
+ 	uint8_t nonce[WG_COOKIE_NONCE_LEN];
+ 	uint8_t enc_cookie[WG_COOKIE_LEN + WG_AUTHTAG_LEN];
+@@ -87,16 +91,14 @@ struct msg_cookie_reply {
+ 
+ /* 5.4.6 Subsequent Messages: Transport Data Messages */
+ struct msg_transport_data {
+-	uint8_t type;
+-	uint8_t reserved[3];
++	uint32_t type;
+ 	uint32_t receiver;
+ 	uint8_t counter[8];
+ 	uint8_t enc_packet[]; /* Encrypted data follows */
+ } __packed;
+ 
+ struct wg_msg_hdr {
+-	uint8_t type;
+-	uint8_t reserved[3];
++	uint32_t type;
+ };
+ 
+ union wg_msg {
+@@ -227,6 +229,8 @@ struct wg_peer {
+ 
+ 	/* First valid message received (this will trigger VPN connected event) */
+ 	bool first_valid : 1;
++
++	struct wireguard_amnezia_params awg;
+ };
+ 
+ static inline bool wg_is_under_load(void)
+@@ -235,6 +239,22 @@ static inline bool wg_is_under_load(void)
+ 	return false;
+ }
+ 
++static inline uint32_t awg_gen_type(const struct wg_peer *peer, int idx)
++{
++	if (!peer->awg.enabled) {
++		return idx;
++	}
++
++	uint32_t lo = peer->awg.header[idx - 1].min;
++	uint32_t hi = peer->awg.header[idx - 1].max;
++
++	if (lo == hi) {
++		return lo;
++	}
++
++	return lo + sys_rand32_get() % (hi - lo + 1);
++}
++
+ typedef void (*wg_peer_cb_t)(struct wg_peer *peer, void *user_data);
+ 
+ void wireguard_peer_foreach(wg_peer_cb_t cb, void *user_data);

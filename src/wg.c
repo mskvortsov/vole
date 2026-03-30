@@ -99,6 +99,7 @@ int wg_set_config(struct net_if *iface, const struct wg_interface_config *cfg)
 	peer_config.allowed_ip[1].is_valid = true;
 
 	peer_config.keepalive_interval = cfg->keepalive_secs;
+	peer_config.awg = cfg->awg;
 
 	ret = wireguard_peer_add(&peer_config, &peer_iface);
 	memset(psk, 0, sizeof(psk));

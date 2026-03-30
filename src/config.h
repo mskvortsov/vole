@@ -5,6 +5,7 @@
 #include <zephyr/app_version.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/wifi.h>
+#include <zephyr/net/wireguard.h>
 #include <zephyr/sys/util_macro.h>
 
 #define VERSION_STRING "v" APP_VERSION_STRING "-" STRINGIFY(APP_BUILD_VERSION)
@@ -52,6 +53,7 @@ struct config_tun_options {
 		struct {
 			char key[45];
 			char pubkey[45];
+			struct wireguard_amnezia_params awg;
 		} wg;
 	} u;
 };
