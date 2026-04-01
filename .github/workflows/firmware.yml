@@ -88,6 +88,7 @@ jobs:
         run: |
           git -C wolfssl apply $GITHUB_WORKSPACE/vole/patches/wolfssl.patch
           git -C zephyr apply $GITHUB_WORKSPACE/vole/patches/zephyr-*.patch
+          git -C zephyr apply $GITHUB_WORKSPACE/vole/patches/wireguard/*.patch
 
       - name: Build ${{ matrix.board.id }}-${{ matrix.flavor.id }}
         run: vole/scripts/make.sh ${{ matrix.flavor.id }} ${{ matrix.board.id }}

@@ -1,0 +1,42 @@
+diff --git a/subsys/net/lib/wireguard/wg.c b/subsys/net/lib/wireguard/wg.c
+--- a/subsys/net/lib/wireguard/wg.c
++++ b/subsys/net/lib/wireguard/wg.c
+@@ -65,7 +65,11 @@ static int interface_send(struct net_if *iface, struct net_pkt *pkt);
+ #define WG_TIMER_PERIOD 500 /* ms */
+ 
+ #define WG_BUF_COUNT CONFIG_WIREGUARD_BUF_COUNT
++#if defined(CONFIG_NET_L2_ETHERNET_RESERVE_HEADER)
++#define WG_MAX_BUF_SIZE (NET_ETH_MAX_HDR_SIZE + CONFIG_WIREGUARD_BUF_LEN)
++#else
+ #define WG_MAX_BUF_SIZE CONFIG_WIREGUARD_BUF_LEN
++#endif
+ 
+ #define WG_DEFAULT_PORT 51820
+ 
+diff --git a/subsys/net/lib/wireguard/wg_crypto.c b/subsys/net/lib/wireguard/wg_crypto.c
+--- a/subsys/net/lib/wireguard/wg_crypto.c
++++ b/subsys/net/lib/wireguard/wg_crypto.c
+@@ -1343,6 +1343,10 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
+ 		return -ENOMEM;
+ 	}
+ 
++#if defined(CONFIG_NET_L2_ETHERNET_RESERVE_HEADER)
++	net_buf_reserve(buf, NET_ETH_MAX_HDR_SIZE);
++#endif
++
+ 	copied = net_buf_linearize(buf->data, data_len, pkt->buffer,
+ 				   ip_udp_hdr_len + sizeof(struct msg_transport_data),
+ 				   data_len);
+@@ -1461,6 +1465,12 @@ static int wg_process_data_message(struct wg_iface_context *ctx,
+ 				continue;
+ 			}
+ 
++			/* 0.0.0.0/0 -- allow all */
++			if (peer->allowed_ip[i].mask_len == 0) {
++				addr_found = true;
++				break;
++			}
++
+ 			src.s_addr = sys_get_be32(
+ 				(const uint8_t *)&NET_IPV4_HDR(pkt_decrypted)->src);
+ 			subnet = UINT32_MAX << (32 - peer->allowed_ip[i].mask_len);

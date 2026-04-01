@@ -1,0 +1,41 @@
+diff --git a/subsys/net/lib/wireguard/wg.c b/subsys/net/lib/wireguard/wg.c
+--- a/subsys/net/lib/wireguard/wg.c
++++ b/subsys/net/lib/wireguard/wg.c
+@@ -266,6 +266,21 @@ static bool should_send_keepalive(struct wg_peer *peer)
+ 	return false;
+ }
+ 
++static bool should_rehandshake_stale_peer(struct wg_peer *peer)
++{
++	uint32_t stale_ticks;
++
++	if (peer->last_tx == 0 ||
++	    peer->last_rx == 0 ||
++	    peer->last_tx <= peer->last_rx) {
++		return false;
++	}
++
++	stale_ticks = k_sec_to_ticks_ceil32(KEEPALIVE_TIMEOUT + REKEY_TIMEOUT);
++
++	return (uint32_t)(sys_clock_tick_get_32() - peer->last_rx) >= stale_ticks;
++}
++
+ static bool can_send_init(struct wg_peer *peer)
+ {
+ 	return ((peer->last_initiation_tx == 0) ||
+@@ -279,6 +294,15 @@ static bool should_send_init(struct wg_peer *peer)
+ 			return true;
+ 		}
+ 
++		/* Match Linux WireGuard's "new handshake" timer semantics:
++		 * after authenticated traffic has been sent, if we stop hearing
++		 * back for KEEPALIVE_TIMEOUT + REKEY_TIMEOUT, force a new
++		 * initiation instead of continuing to use a stale session.
++		 */
++		if (should_rehandshake_stale_peer(peer)) {
++			return true;
++		}
++
+ 		if (peer->session.keypair.current.is_valid &&
+ 		    !peer->session.keypair.current.is_initiator) {
+ 			k_timepoint_t expires;
