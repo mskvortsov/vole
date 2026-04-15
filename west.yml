@@ -2,7 +2,7 @@ manifest:
   projects:
     - name: zephyr
       url: https://github.com/zephyrproject-rtos/zephyr
-      revision: 09ad7174e940fde3bdd2e24214ca249c12a41cb8
+      revision: v4.4.0
       import:
         file: west.yml
         name-allowlist:
@@ -14,11 +14,11 @@ manifest:
 
     - name: wolfssl
       url: https://github.com/wolfSSL/wolfssl
-      revision: v5.9.0-stable
+      revision: v5.9.1-stable
 
     - name: tomlc17
       url: https://github.com/cktan/tomlc17
-      revision: R260302
+      revision: R260414
 
     - name: cryptogams
       url: https://github.com/dot-asm/cryptogams

@@ -1,8 +1,8 @@
 diff --git a/subsys/net/ip/ipv6.c b/subsys/net/ip/ipv6.c
-index fc6c2d1177f..bf74ed4f1a1 100644
+index 0cd40c51076..3473322a1cc 100644
 --- a/subsys/net/ip/ipv6.c
 +++ b/subsys/net/ip/ipv6.c
-@@ -607,14 +607,30 @@ enum net_verdict net_ipv6_input(struct net_pkt *pkt)
+@@ -617,14 +617,30 @@ enum net_verdict net_ipv6_input(struct net_pkt *pkt)
  
  	if (!net_ipv6_is_addr_mcast_raw(hdr->dst)) {
  		if (!net_if_ipv6_addr_lookup_by_iface_raw(pkt_iface, hdr->dst)) {
@@ -91,7 +91,7 @@ index 860a02bb54a..ca16d61eda9 100644
  		}
  	}
 diff --git a/subsys/net/ip/net_if.c b/subsys/net/ip/net_if.c
-index 2cde3ab535d..d031e24dc14 100644
+index 08a418e1498..424727ddaba 100644
 --- a/subsys/net/ip/net_if.c
 +++ b/subsys/net/ip/net_if.c
 @@ -1161,7 +1161,7 @@ static void join_mcast_allnodes(struct net_if *iface)

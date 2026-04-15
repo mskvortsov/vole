@@ -44,6 +44,7 @@ def spawn(config: str) -> subprocess.Popen:
     c = tomllib.loads(config)
     role = c["role"]
     log(f"running {role} {c['endpoint']} pid {process.pid}")
+    assert process.stdin
     process.stdin.write(config)
     process.stdin.close()
     processes[process] = role
@@ -64,6 +65,7 @@ def terminated(process: subprocess.Popen, exit_code: int):
     log(f"checking {processes[process]} pid {process.pid} has been terminated")
     process.wait(1)
     assert process.poll() is not None
+    assert process.stderr
     assert not process.stderr.read()
     log(f"checking exit code is {exit_code}")
     assert process.returncode == exit_code
@@ -78,6 +80,7 @@ def killall():
 
 def assert_line_generic(process: subprocess.Popen, tag: str, err: bool, timeout: int):
     log(f'looking for "{tag}" for {processes[process]} pid {process.pid}')
+    assert process.stderr and process.stdout
     start_time = time.time()
     while True:
         elapsed = time.time() - start_time
@@ -332,7 +335,7 @@ def test_connect_disconnect_udp():
     terminate(server)
 
 
-if len(sys.argv) > 3:
+if len(sys.argv) < 2 or len(sys.argv) > 3:
     print("Usage: python3 test.py <tun-executable-path> [verbose]")
     sys.exit()
 

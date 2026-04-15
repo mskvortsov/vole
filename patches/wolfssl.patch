@@ -1,8 +1,8 @@
 diff --git a/src/internal.c b/src/internal.c
-index 0ffe6c51f..d31254600 100644
+index ad1587e0f..3f5897a41 100644
 --- a/src/internal.c
 +++ b/src/internal.c
-@@ -10789,7 +10789,7 @@ static void AddRecordHeader(byte* output, word32 length, byte type,
+@@ -10870,7 +10870,7 @@ static void AddRecordHeader(byte* output, word32 length, byte type,
  #if !defined(WOLFSSL_NO_TLS12) || (defined(HAVE_SESSION_TICKET) && \
      !defined(NO_WOLFSSL_SERVER)) || \
      defined(HAVE_CERTIFICATE_STATUS_REQUEST) || \
@@ -12,10 +12,10 @@ index 0ffe6c51f..d31254600 100644
  static void AddHandShakeHeader(byte* output, word32 length,
                                 word32 fragOffset, word32 fragLength,
 diff --git a/wolfcrypt/src/wc_port.c b/wolfcrypt/src/wc_port.c
-index b0f8c07aa..839b7421b 100644
+index 92283abdf..5de37d847 100644
 --- a/wolfcrypt/src/wc_port.c
 +++ b/wolfcrypt/src/wc_port.c
-@@ -4000,7 +4000,7 @@ time_t z_time(time_t * timer)
+@@ -4125,7 +4125,7 @@ time_t z_time(time_t * timer)
  
      /* Fallback to uptime since boot. This works for relative times, but
       * not for ASN.1 date validation */

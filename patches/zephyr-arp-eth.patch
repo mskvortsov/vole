@@ -90,7 +90,7 @@ index ef6bbfee39e..5c58bcff3a0 100644
  #define net_arp_clear_cache(...)
  #define net_arp_foreach(...) 0
 diff --git a/subsys/net/l2/ethernet/ethernet.c b/subsys/net/l2/ethernet/ethernet.c
-index c48d5cce18d..53448fc4b2e 100644
+index 9e82bacb9f2..c0b03f2cb82 100644
 --- a/subsys/net/l2/ethernet/ethernet.c
 +++ b/subsys/net/l2/ethernet/ethernet.c
 @@ -488,7 +488,8 @@ static bool ethernet_fill_in_dst_on_ipv4_mcast(struct net_pkt *pkt,
