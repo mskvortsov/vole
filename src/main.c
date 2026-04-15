@@ -457,6 +457,7 @@ int main(void)
 		events = event_consume(events, EVENTS_POLL_TIMEOUT);
 
 #if 0
+		extern void sojourn_print(void);
 		sojourn_print();
 		aqm_stats_print();
 #endif

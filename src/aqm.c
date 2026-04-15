@@ -230,6 +230,9 @@ static uint32_t max_backlog;
 static struct codel_params params;
 static struct codel_vars vars;
 static struct codel_stats stats;
+static uint32_t sta_sojourn_ewma_ns;
+static uint32_t sta_inflight_total;
+static uint32_t sta_aql_limit;
 
 static inline codel_time_t pkt_time(struct net_pkt *pkt)
 {
@@ -279,6 +282,8 @@ void aqm_stats_print(void)
 	printk("codel max_packet %u\n", stats.maxpacket);
 	printk("codel drop count %u\n", stats.drop_count);
 	printk("codel drop bytes %u\n", stats.drop_len);
+	printk("sta inflight %u aql_limit %u sojourn_ewma %u ns\n",
+	       sta_inflight_total, sta_aql_limit, sta_sojourn_ewma_ns);
 }
 
 void aqm_stats_get(struct aqm_stats *aqm_stats)
@@ -287,10 +292,38 @@ void aqm_stats_get(struct aqm_stats *aqm_stats)
 	aqm_stats->backlog = atomic_get(&backlog);
 }
 
+/* Called from zephyr/drivers/wifi/esp32/src/esp_wifi_drv.c */
+void esp_wifi_tx_aql_cb(int ifx, uint32_t sojourn_ewma_ns, uint32_t inflight_total,
+			uint32_t aql_limit)
+{
+	if (ifx == 0) { /* WIFI_IF_STA */
+		sta_sojourn_ewma_ns = sojourn_ewma_ns;
+		sta_inflight_total = inflight_total;
+		sta_aql_limit = aql_limit;
+	}
+}
+
 /* Called from tc_tx_handler() at zephyr/subsys/net/ip/net_tc.c */
 struct net_pkt *aqm_dequeue(struct k_fifo *fifo)
 {
-	return codel_dequeue(fifo, atomic_get(&backlog), &params, &vars, &stats);
+	codel_time_t wifi_delay = (codel_time_t)(sta_sojourn_ewma_ns >> CODEL_SHIFT);
+	struct codel_params p = params;
+
+	p.target = (p.target > wifi_delay + MS2TIME(1))
+		   ? p.target - wifi_delay
+		   : MS2TIME(1);
+
+	struct net_pkt *pkt = codel_dequeue(fifo, atomic_get(&backlog), &p, &vars, &stats);
+
+	if (pkt && sta_aql_limit > 0 &&
+	    sta_inflight_total + net_pkt_get_len(pkt) > sta_aql_limit) {
+		stats.drop_len += net_pkt_get_len(pkt);
+		stats.drop_count++;
+		net_pkt_unref(pkt);
+		return NULL;
+	}
+
+	return pkt;
 }
 
 

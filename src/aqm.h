@@ -70,7 +70,7 @@ typedef int32_t codel_tdiff_t;
 static inline net_time_t get_time_ns(void)
 {
 #if defined(CONFIG_TIMER_HAS_64BIT_CYCLE_COUNTER)
-	return k_cyc_to_ns_floor64(k_cycle_get_64());;
+	return k_cyc_to_ns_floor64(k_cycle_get_64());
 #else
 	return k_cyc_to_ns_floor64(k_cycle_get_32());
 #endif

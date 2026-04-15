@@ -196,12 +196,23 @@ int wifi_init(void)
 		return 1;
 	}
 
+	const struct device *wan_dev = net_if_get_device(iface_wan);
+	if (!device_is_ready(wan_dev)) {
+		LOG_ERR("WAN Wi-Fi device not ready");
+  		return 1;
+	}
+
 	memcpy(wan_hwaddr_orig, net_if_get_link_addr(iface_wan)->addr, WIFI_MAC_ADDR_LEN);
 
 #if defined(CONFIG_VOLE_LAN)
 	iface_lan = net_if_get_wifi_sap();
 	if (!iface_lan) {
 		LOG_ERR("cannot get lan iface");
+		return 1;
+	}
+	const struct device *lan_dev = net_if_get_device(iface_lan);
+	if (!device_is_ready(lan_dev)) {
+		LOG_ERR("LAN Wi-Fi device not ready");
 		return 1;
 	}
 	net_if_flag_clear(iface_lan, NET_IF_IPV4);

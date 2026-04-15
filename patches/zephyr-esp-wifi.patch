@@ -1,14 +1,239 @@
 diff --git a/drivers/wifi/esp32/src/esp_wifi_drv.c b/drivers/wifi/esp32/src/esp_wifi_drv.c
-index d96c3bfd85d..a9ba8aae2ea 100644
+index d96c3bfd85d..3dcf0b213d5 100644
 --- a/drivers/wifi/esp32/src/esp_wifi_drv.c
 +++ b/drivers/wifi/esp32/src/esp_wifi_drv.c
-@@ -93,24 +93,44 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
+@@ -9,6 +9,8 @@
+ #include <zephyr/logging/log.h>
+ LOG_MODULE_REGISTER(esp32_wifi, CONFIG_WIFI_LOG_LEVEL);
+ 
++#include <zephyr/arch/common/ffs.h>
++#include <zephyr/kernel.h>
+ #include <zephyr/net/ethernet.h>
+ #include <zephyr/net/net_pkt.h>
+ #include <zephyr/net/net_if.h>
+@@ -19,6 +21,7 @@ LOG_MODULE_REGISTER(esp32_wifi, CONFIG_WIFI_LOG_LEVEL);
+ #if defined(CONFIG_ESP32_WIFI_AP_STA_MODE)
+ #include <zephyr/net/wifi_nm.h>
+ #endif
++#include <zephyr/sys/clock.h>
+ #include <zephyr/device.h>
+ #include <soc.h>
+ #include "esp_private/wifi.h"
+@@ -67,6 +70,39 @@ struct esp32_wifi_status {
+ 	int rssi;
+ };
+ 
++struct esp_wifi_eb_datawin {
++	uint32_t packed0;
++	uint8_t *data;
++};
++
++struct esp_wifi_ebuf {
++	void *netstack_buf;
++	struct esp_wifi_eb_datawin *dw;
++	uint8_t reserved8[8];
++	uint8_t *storage_base;
++	uint16_t headroom;
++	uint16_t len;
++	uint8_t reserved24[2];
++	uint8_t type;
++	uint8_t reserved27;
++	uint32_t ctrl28;
++	uint16_t ctrl30;
++	uint8_t reserved32[4];
++	uint32_t cookie36;
++	uint8_t reserved40[4];
++	void *sched_ctx;
++	struct esp_wifi_ebuf *next;
++	void *txhdr;
++};
++
++struct tx_entry {
++	const struct esp_wifi_ebuf *ebuf;
++	size_t len;
++	uint32_t timestamp_cyc;
++};
++
++#define INFLIGHT_TX_ENTRIES_NUM 32
++
+ struct esp32_wifi_runtime {
+ 	uint8_t mac_addr[WIFI_MAC_ADDR_LEN];
+ 	uint8_t frame_buf[NET_ETH_MAX_FRAME_SIZE];
+@@ -77,6 +113,12 @@ struct esp32_wifi_runtime {
+ 	scan_result_cb_t scan_cb;
+ 	uint8_t state;
+ 	uint8_t ap_connection_cnt;
++
++	struct tx_entry tx_inflight[INFLIGHT_TX_ENTRIES_NUM];
++	uint32_t tx_inflight_bitmap;
++	uint32_t tx_inflight_total;
++	uint32_t tx_aql_limit;
++	uint32_t tx_sojourn_ewma_cyc;
+ };
+ 
+ static struct net_mgmt_event_callback esp32_dhcp_cb;
+@@ -93,24 +135,197 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t mgmt
  	}
  }
  
 +#define PKT_ALLOC_TIMEOUT K_MSEC(1)
++
++#define AQL_TARGET_CYC  k_ms_to_cyc_ceil32(10)
++#define AQL_MIN_BYTES   1500U
++#define AQL_MAX_BYTES   (16U * 1500U)
++#define AQL_INIT_BYTES  (4U * 1500U)
++
 +extern void esp_wifi_rx_cb(struct net_pkt *pkt);
 +extern void esp_wifi_tx_cb(struct net_pkt *pkt);
++extern void esp_wifi_tx_aql_cb(int ifx, uint32_t sojourn_ewma_ns, uint32_t inflight_total,
++			       uint32_t aql_limit);
++
++static struct k_spinlock tx_inflight_lock;
++static atomic_ptr_t last_post_hmac_tx_ebuf = ATOMIC_PTR_INIT(NULL);
++
++static void esp32_reset_tx_inflight(struct esp32_wifi_runtime *rt)
++{
++	K_SPINLOCK(&tx_inflight_lock) {
++		rt->tx_inflight_total = 0;
++		rt->tx_inflight_bitmap = 0;
++	}
++	rt->tx_aql_limit = AQL_INIT_BYTES;
++	rt->tx_sojourn_ewma_cyc = 0;
++}
++
++/* Wrapper over real ieee80211_post_hmac_tx defined in blob */
++int ieee80211_post_hmac_tx(struct esp_wifi_ebuf *ebuf)
++{
++	extern int __real_ieee80211_post_hmac_tx(struct esp_wifi_ebuf *ebuf);
++	atomic_ptr_set(&last_post_hmac_tx_ebuf, ebuf);
++	return __real_ieee80211_post_hmac_tx(ebuf);
++}
++
++static int esp32_wifi_internal_tx_inflight(struct esp32_wifi_runtime *rt, void *frame, size_t len)
++{
++	wifi_interface_t ifx = rt == &esp32_data ? WIFI_IF_STA : WIFI_IF_AP;
++	const struct esp_wifi_ebuf *ebuf;
++	size_t index;
++	int ret;
++
++	index = find_lsb_set(~rt->tx_inflight_bitmap);
++	if (index == 0) {
++		return ESP_ERR_NO_MEM;
++	}
++	index -= 1;
++
++	atomic_ptr_clear(&last_post_hmac_tx_ebuf);
++	ret = esp_wifi_internal_tx(ifx, frame, len);
++	if (ret != ESP_OK) {
++		return ret;
++	}
++
++	ebuf = atomic_ptr_clear(&last_post_hmac_tx_ebuf);
++	if (!ebuf) {
++		LOG_WRN("ieee80211_post_hmac_tx didn't set ebuf pointer");
++		return ret;
++	}
++
++	K_SPINLOCK(&tx_inflight_lock) {
++		struct tx_entry *entry = &rt->tx_inflight[index];
++		entry->ebuf = ebuf;
++		entry->len = len;
++		entry->timestamp_cyc = k_cycle_get_32();
++		rt->tx_inflight_bitmap |= 1U << index;
++		rt->tx_inflight_total += len;
++	}
++
++	return ret;
++}
++
++static struct tx_entry *esp32_remove_tx_inflight_entry(struct esp32_wifi_runtime *rt,
++						       struct esp_wifi_ebuf *ebuf)
++{
++	uint32_t bitmap = rt->tx_inflight_bitmap;
++	size_t index;
++
++	while ((index = find_lsb_set(bitmap)) != 0) {
++		index -= 1;
++		bitmap &= ~(1U << index);
++		if (rt->tx_inflight[index].ebuf == ebuf) {
++			rt->tx_inflight_bitmap &= ~(1U << index);
++			return &rt->tx_inflight[index];
++		}
++	}
++
++	return NULL;
++}
++
++static void esp32_tx_done(uint8_t ifx, uint8_t *data, uint16_t *data_len, bool tx_status)
++{
++	struct esp_wifi_ebuf *ebuf = CONTAINER_OF(data_len, struct esp_wifi_ebuf, len);
++	struct esp32_wifi_runtime *rt;
++	struct tx_entry *entry;
++	uint32_t now = k_cycle_get_32();
++
++	if (!data_len) {
++		LOG_WRN("data_len ptr is NULL");
++		return;
++	}
++
++	K_SPINLOCK(&tx_inflight_lock) {
++		entry = esp32_remove_tx_inflight_entry(&esp32_data, ebuf);
++		if (entry) {
++			rt = &esp32_data;
++		} else {
++			entry = esp32_remove_tx_inflight_entry(&esp32_ap_sta_data, ebuf);
++			if (entry) {
++				rt = &esp32_ap_sta_data;
++			}
++		}
++	}
++
++	if (entry) {
++		rt->tx_inflight_total -= entry->len;
++	} else {
++		/* ifx 255 is presumably broadcast traffic */
++		if (ifx != 255) {
++			LOG_WRN("cannot find tx inflight entry, ifx %d len %u tx_status %d", ifx,
++				*data_len, tx_status);
++		}
++		return;
++	}
++
++	uint32_t sojourn = now - entry->timestamp_cyc;
++
++	rt->tx_sojourn_ewma_cyc = rt->tx_sojourn_ewma_cyc
++				  - (rt->tx_sojourn_ewma_cyc >> 2)
++				  + (sojourn >> 2);
++
++	if (rt->tx_sojourn_ewma_cyc > AQL_TARGET_CYC) {
++		rt->tx_aql_limit = MAX(rt->tx_aql_limit - entry->len, AQL_MIN_BYTES);
++	} else {
++		rt->tx_aql_limit = MIN(rt->tx_aql_limit + AQL_MIN_BYTES, AQL_MAX_BYTES);
++	}
++
++	wifi_interface_t tx_ifx = (rt == &esp32_data) ? WIFI_IF_STA : WIFI_IF_AP;
++	esp_wifi_tx_aql_cb(tx_ifx, k_cyc_to_ns_floor32(rt->tx_sojourn_ewma_cyc),
++			   rt->tx_inflight_total, rt->tx_aql_limit);
++
++	const char *tx_status_str = tx_status ? "succ" : "fail";
++	if (ifx == WIFI_IF_STA) {
++		LOG_INF("sta %6u us, aql %6u, len %4u %s",
++			k_cyc_to_us_floor32(sojourn), rt->tx_aql_limit, *data_len, tx_status_str);
++	} else if (ifx == WIFI_IF_AP) {
++		LOG_INF("                                              "
++			" ap %6u us, aql %6u, len %4u %s",
++			k_cyc_to_us_floor32(sojourn), rt->tx_aql_limit, *data_len, tx_status_str);
++	} else if (ifx == 255) {
++		LOG_INF("                       "
++			"255 %6u us, aql %6u, len %4u %s",
++			k_cyc_to_us_floor32(sojourn), rt->tx_aql_limit, *data_len, tx_status_str);
++	} else {
++		LOG_ERR("unexpected ifx %d", ifx);
++	}
++
++	LOG_INF_RATELIMIT("inflight bitmap sta %032b", esp32_data.tx_inflight_bitmap);
++	LOG_INF_RATELIMIT("inflight bitmap  ap %032b", esp32_ap_sta_data.tx_inflight_bitmap);
++}
 +
  static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
  {
@@ -16,7 +241,6 @@ index d96c3bfd85d..a9ba8aae2ea 100644
 -	const int pkt_len = net_pkt_get_len(pkt);
 -	esp_interface_t ifx = data->state == ESP32_AP_CONNECTED ? ESP_IF_WIFI_AP : ESP_IF_WIFI_STA;
 +	size_t pkt_len = net_pkt_get_len(pkt);
-+	wifi_interface_t ifx = data == &esp32_data ? WIFI_IF_STA : WIFI_IF_AP;
 +	int ret;
  
  	if (data->state != ESP32_STA_CONNECTED && data->state != ESP32_AP_CONNECTED) {
@@ -30,11 +254,10 @@ index d96c3bfd85d..a9ba8aae2ea 100644
 +
 +	void *frame_buf;
 +	struct net_buf *buf = pkt->frags;
++
 +	if (buf && !buf->frags) {
-+		/* Payload fits into one fragment */
 +		frame_buf = buf->data;
 +	} else {
-+		/* Read the packet payload */
 +		ret = net_pkt_read(pkt, data->frame_buf, pkt_len);
 +		if (ret < 0) {
 +			goto fail;
@@ -45,7 +268,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	/* Enqueue packet for transmission */
 -	if (esp_wifi_internal_tx(ifx, (void *)data->frame_buf, pkt_len) != ESP_OK) {
 -		goto out;
-+	ret = esp_wifi_internal_tx(ifx, frame_buf, pkt_len);
++	ret = esp32_wifi_internal_tx_inflight(data, frame_buf, pkt_len);
 +	if (ret == ESP_ERR_NO_MEM) {
 +		return -ENOMEM;
 +	}
@@ -54,7 +277,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	}
  
  #if defined(CONFIG_NET_STATISTICS_WIFI)
-@@ -121,9 +141,9 @@ static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
+@@ -121,9 +336,9 @@ static int esp32_wifi_send(const struct device *dev, struct net_pkt *pkt)
  	LOG_DBG("pkt sent %p len %d", pkt, pkt_len);
  	return 0;
  
@@ -66,7 +289,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  #if defined(CONFIG_NET_STATISTICS_WIFI)
  	data->stats.errors.tx++;
  #endif
-@@ -140,7 +160,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
+@@ -140,7 +355,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
  		return -EIO;
  	}
  
@@ -76,7 +299,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	if (!pkt) {
  		LOG_ERR("Failed to allocate net buffer");
  		esp_wifi_internal_free_rx_buffer(eb);
-@@ -152,6 +173,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
+@@ -152,6 +368,8 @@ static esp_err_t eth_esp32_rx(void *buffer, uint16_t len, void *eb)
  		goto pkt_unref;
  	}
  
@@ -85,7 +308,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	if (net_recv_data(esp32_wifi_iface, pkt) < 0) {
  		LOG_ERR("Failed to push received data");
  		goto pkt_unref;
-@@ -188,7 +211,7 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
+@@ -188,7 +406,7 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
  	}
  
  	pkt = net_pkt_rx_alloc_with_buffer(esp32_wifi_iface_ap, len,
@@ -94,7 +317,7 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	if (!pkt) {
  		esp_wifi_internal_free_rx_buffer(eb);
  		LOG_ERR("Failed to get net buffer");
-@@ -200,6 +223,8 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
+@@ -200,6 +418,8 @@ static esp_err_t wifi_esp32_ap_iface_rx(void *buffer, uint16_t len, void *eb)
  		goto pkt_unref;
  	}
  
@@ -103,7 +326,51 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  	if (net_recv_data(esp32_wifi_iface_ap, pkt) < 0) {
  		LOG_ERR("Failed to push received data");
  		goto pkt_unref;
-@@ -457,8 +482,10 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
+@@ -295,6 +515,7 @@ static void esp_wifi_handle_sta_connect_event(void *event_data)
+ {
+ 	ARG_UNUSED(event_data);
+ 	esp32_data.state = ESP32_STA_CONNECTED;
++	esp32_reset_tx_inflight(&esp32_data);
+ #if defined(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4)
+ 	net_dhcpv4_start(esp32_wifi_iface);
+ #else
+@@ -338,6 +559,8 @@ static void esp_wifi_handle_sta_disconnect_event(void *event_data)
+ 	} else {
+ 		esp32_data.state = ESP32_STA_STARTED;
+ 	}
++
++	esp32_reset_tx_inflight(&esp32_data);
+ }
+ 
+ static void esp_wifi_handle_ap_connect_event(void *event_data)
+@@ -427,10 +650,12 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
+ 	switch (event_id) {
+ 	case WIFI_EVENT_STA_START:
+ 		esp32_data.state = ESP32_STA_STARTED;
++		esp32_reset_tx_inflight(&esp32_data);
+ 		net_eth_carrier_on(esp32_wifi_iface);
+ 		break;
+ 	case WIFI_EVENT_STA_STOP:
+ 		esp32_data.state = ESP32_STA_STOPPED;
++		esp32_reset_tx_inflight(&esp32_data);
+ 		net_eth_carrier_off(esp32_wifi_iface);
+ 		break;
+ 	case WIFI_EVENT_STA_CONNECTED:
+@@ -444,11 +669,13 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
+ 		break;
+ 	case WIFI_EVENT_AP_START:
+ 		ap_data->state = ESP32_AP_STARTED;
++		esp32_reset_tx_inflight(ap_data);
+ 		net_eth_carrier_on(iface_ap);
+ 		wifi_mgmt_raise_ap_enable_result_event(iface_ap, 0);
+ 		break;
+ 	case WIFI_EVENT_AP_STOP:
+ 		ap_data->state = ESP32_AP_STOPPED;
++		esp32_reset_tx_inflight(ap_data);
+ 		net_eth_carrier_off(iface_ap);
+ 		wifi_mgmt_raise_ap_disable_result_event(iface_ap, 0);
+ 		break;
+@@ -457,8 +684,11 @@ void esp_wifi_event_handler(const char *event_base, int32_t event_id, void *even
  		esp_wifi_handle_ap_connect_event(event_data);
  		break;
  	case WIFI_EVENT_AP_STADISCONNECTED:
@@ -111,7 +378,104 @@ index d96c3bfd85d..a9ba8aae2ea 100644
  		esp_wifi_handle_ap_disconnect_event(event_data);
 +		if (!esp32_data.ap_connection_cnt) {
 +			ap_data->state = ESP32_AP_DISCONNECTED;
++			esp32_reset_tx_inflight(ap_data);
 +		}
  		break;
  	default:
  		break;
+@@ -504,7 +734,7 @@ static int esp32_wifi_connect(const struct device *dev,
+ 	}
+ 
+ 	if (ret) {
+-		LOG_ERR("Failed to set Wi-Fi mode (%d)", ret);
++		LOG_ERR("Failed to set Wi-Fi mode during connect (%d)", ret);
+ 		return -EAGAIN;
+ 	}
+ 	ret = esp_wifi_start();
+@@ -647,7 +877,7 @@ static int esp32_wifi_scan(const struct device *dev, struct wifi_scan_params *pa
+ #endif
+ 
+ 	if (ret) {
+-		LOG_ERR("Failed to set Wi-Fi mode (%d)", ret);
++		LOG_ERR("Failed to set Wi-Fi mode during scan (%d)", ret);
+ 		data->scan_cb = NULL;
+ 		return -EINVAL;
+ 	}
+@@ -740,14 +970,18 @@ static int esp32_wifi_ap_enable(const struct device *dev,
+ 	wifi_mode_t mode;
+ 
+ 	err = esp_wifi_get_mode(&mode);
++	if (err) {
++		LOG_ERR("Failed to get Wi-Fi mode during AP enable (%d)", err);
++		return -EINVAL;
++	}
+ 	if (IS_ENABLED(CONFIG_ESP32_WIFI_AP_STA_MODE) &&
+ 	    (mode == ESP32_WIFI_MODE_STA || mode == ESP32_WIFI_MODE_APSTA)) {
+-		err |= esp_wifi_set_mode(ESP32_WIFI_MODE_APSTA);
++		err = esp_wifi_set_mode(ESP32_WIFI_MODE_APSTA);
+ 	} else {
+-		err |= esp_wifi_set_mode(ESP32_WIFI_MODE_AP);
++		err = esp_wifi_set_mode(ESP32_WIFI_MODE_AP);
+ 	}
+ 	if (err) {
+-		LOG_ERR("Failed to set Wi-Fi mode (%d)", err);
++		LOG_ERR("Failed to set Wi-Fi mode during AP enable (%d)", err);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -970,20 +1204,24 @@ static void esp32_wifi_init(struct net_if *iface)
+ 
+ 	esp32_wifi_iface = iface;
+ 	dev_data->state = ESP32_STA_STOPPED;
++	esp32_reset_tx_inflight(dev_data);
+ 
+ 	/* Start interface when we are actually connected with Wi-Fi network */
+ 	esp_read_mac(dev_data->mac_addr, ESP_MAC_WIFI_STA);
+ 	esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, eth_esp32_rx);
++	esp_wifi_set_tx_done_cb(esp32_tx_done);
+ 	wifi_nm_register_mgd_type_iface(nm, WIFI_TYPE_STA, esp32_wifi_iface);
+ 
+ #else
+ 
+ 	esp32_wifi_iface = iface;
+ 	dev_data->state = ESP32_STA_STOPPED;
++	esp32_reset_tx_inflight(dev_data);
+ 
+ 	/* Start interface when we are actually connected with Wi-Fi network */
+ 	esp_read_mac(dev_data->mac_addr, ESP_MAC_WIFI_STA);
+ 	esp_wifi_internal_reg_rxcb(ESP_IF_WIFI_STA, eth_esp32_rx);
++	esp_wifi_set_tx_done_cb(esp32_tx_done);
+ 
+ #endif
+ 
+@@ -1007,6 +1245,7 @@ static void esp32_wifi_init_ap(struct net_if *iface)
+ 
+ 	esp32_wifi_iface_ap = iface;
+ 	dev_data->state = ESP32_AP_STOPPED;
++	esp32_reset_tx_inflight(dev_data);
+ 
+ 	esp_read_mac(dev_data->mac_addr, ESP_MAC_WIFI_SOFTAP);
+ 	wifi_nm_register_mgd_type_iface(nm, WIFI_TYPE_SAP, esp32_wifi_iface_ap);
+@@ -1058,8 +1297,6 @@ static int esp32_wifi_dev_init(const struct device *dev)
+ 
+ 	wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
+ 	esp_err_t ret = esp_wifi_init(&config);
+-	esp_wifi_set_mode(ESP32_WIFI_MODE_NULL);
+-
+ 	if (ret == ESP_ERR_NO_MEM) {
+ 		LOG_ERR("Not enough memory to initialize Wi-Fi.");
+ 		LOG_ERR("Consider increasing CONFIG_HEAP_MEM_POOL_SIZE value.");
+@@ -1068,6 +1305,13 @@ static int esp32_wifi_dev_init(const struct device *dev)
+ 		LOG_ERR("Unable to initialize the Wi-Fi: %d", ret);
+ 		return -EIO;
+ 	}
++
++	ret = esp_wifi_set_mode(ESP32_WIFI_MODE_NULL);
++	if (ret != ESP_OK) {
++		LOG_ERR("Failed to set Wi-Fi mode during device init (%d)", ret);
++		return -EIO;
++	}
++
+ 	if (IS_ENABLED(CONFIG_ESP32_WIFI_STA_AUTO_DHCPV4)) {
+ 		net_mgmt_init_event_callback(&esp32_dhcp_cb, wifi_event_handler, DHCPV4_MASK);
+ 		net_mgmt_add_event_callback(&esp32_dhcp_cb);

@@ -6,8 +6,31 @@ if(BOARD MATCHES "esp32")
     list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_SOURCE_DIR}/boards/esp32-common.conf)
 endif()
 
+if(BOARD MATCHES "esp32")
+    # Patch libnet80211.a at configure time so that our ieee80211_post_hmac_tx()
+    # wrapper in esp_wifi_drv.c intercepts all callers.
+    string(REGEX MATCH "esp32[a-z0-9]+" _wifi_soc "${BOARD}")
+    set(_blob_src
+        ${CMAKE_CURRENT_SOURCE_DIR}/../modules/hal/espressif/zephyr/blobs/lib/${_wifi_soc}/libnet80211.a)
+    set(_patched_dir ${CMAKE_CURRENT_BINARY_DIR}/patched-blobs)
+    set(_patch_script ${CMAKE_CURRENT_SOURCE_DIR}/scripts/patch-net80211-blob.sh)
+
+    if(EXISTS "${_blob_src}")
+        execute_process(
+            COMMAND sh ${_patch_script} ${_wifi_soc} ${_blob_src} ${_patched_dir}
+            RESULT_VARIABLE _patch_result)
+        if(NOT _patch_result EQUAL 0)
+            message(FATAL_ERROR "Failed to patch ${_blob_src}")
+        endif()
+    endif()
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(vole)
+
+if(BOARD MATCHES "esp32")
+    target_link_directories(zephyr_interface BEFORE INTERFACE "${_patched_dir}")
+endif()
 
 zephyr_get_include_directories_for_lang(       C includes)
 zephyr_get_system_include_directories_for_lang(C system_includes)

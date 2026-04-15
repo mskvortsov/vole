@@ -53,5 +53,5 @@ west build --pristine=always --board $board vole -- $extra_conf
 
 if [ -n "$port" ]; then
     west flash --esp-device $port
-    west espressif monitor --port $port
+    picocom --baud 115200 --logfile run.log $port
 fi
