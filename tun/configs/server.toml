@@ -8,3 +8,4 @@ routes = [ "192.168.44.0/24" ]
 psk = "AAAAAAAAAAAAAAAAAAAAAA=="
 timeout = 60
 verbosity = 0
+privdrop = "nogroup:nobody"

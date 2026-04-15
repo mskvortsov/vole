@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <strings.h>
@@ -12,6 +11,10 @@
 #include <time.h>
 #include <sys/time.h>
 #include <signal.h>
+#include <grp.h>
+#include <pwd.h>
+#include <sys/syscall.h>
+#include <linux/capability.h>
 
 #include <tomlc17.h>
 
@@ -33,7 +36,6 @@
 #include "version.h"
 
 static const char *client_id = "default";
-static const char udp_hello[] = "hello";
 
 #define TUNNEL_MIN_MTU 576
 #define TUNNEL_DEFAULT_MTU 1360
@@ -50,20 +52,14 @@ enum role {
 };
 
 struct proto {
-    const char *name;
-    enum {
-        PROTO_UDP,
-        PROTO_DTLS12,
-        PROTO_DTLS13,
-    } proto;
+    const char *cipher_suite;
+    uint8_t dtls_overhead;
 };
 
 static const struct proto protos[] = {
-    { "ECDHE-PSK-AES128-CBC-SHA256", PROTO_DTLS12 },
-    { "TLS13-AES128-CCM-8-SHA256", PROTO_DTLS13 },
-    { "TLS13-CHACHA20-POLY1305-SHA256", PROTO_DTLS13 },
-    { "TLS13-SHA256-SHA256", PROTO_DTLS13 },
-    { "UDP", PROTO_UDP },
+    { "TLS13-AES128-CCM-8-SHA256", 14 },
+    { "TLS13-CHACHA20-POLY1305-SHA256", 22 },
+    { "TLS13-SHA256-SHA256", 37 },
     { 0 }
 };
 
@@ -88,6 +84,7 @@ struct config {
     unsigned int verbosity;
     bool seccomp;
     time_t timeout;
+    char privdrop[128];
 } g_config;
 
 static struct context {
@@ -163,8 +160,8 @@ static void wolfSSL_log_cb(const int log_level, const char *const log_message)
 static const struct proto *find_proto(const char *name)
 {
     const struct proto *proto = &protos[0];
-    while (proto->name) {
-        if (strcasecmp(proto->name, name) == 0) {
+    while (proto->cipher_suite) {
+        if (strcasecmp(proto->cipher_suite, name) == 0) {
             return proto;
         }
         ++proto;
@@ -173,7 +170,6 @@ static const struct proto *find_proto(const char *name)
 }
 
 static void process_dtls(void);
-static void process_udp(struct sockaddr_in *peer);
 static int config_tun(void);
 static int config_tun_routes(void);
 
@@ -259,7 +255,7 @@ static int config_tun(void)
 
     struct sockaddr_in *mask = (struct sockaddr_in *)&ifr.ifr_netmask;
     mask->sin_family = AF_INET;
-    mask->sin_addr.s_addr = htonl(~0U << (32 - g_config.address.prefix));
+    mask->sin_addr.s_addr = g_config.address.prefix == 0 ? 0 : htonl(~0U << (32 - g_config.address.prefix));
 
     if (ioctl(sock_fd, SIOCSIFNETMASK, &ifr) < 0) {
         LOGP("ioctl SIOCSIFNETMASK");
@@ -288,18 +284,17 @@ fail:
 }
 
 static int config_tun_route(int iface, struct mnl_socket *nl, unsigned int portid,
-                            struct address *address)
+                            struct address *address, uint32_t seq)
 {
     int ret;
     struct nlmsghdr *nlh;
     struct rtmsg *rtm;
     char buf[MNL_SOCKET_BUFFER_SIZE];
-    uint32_t seq;
 
     nlh = mnl_nlmsg_put_header(buf);
     nlh->nlmsg_type = RTM_NEWROUTE;
     nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_ACK;
-    nlh->nlmsg_seq = seq = time(NULL);
+    nlh->nlmsg_seq = seq;
 
     rtm = mnl_nlmsg_put_extra_header(nlh, sizeof(struct rtmsg));
     rtm->rtm_family = AF_INET;
@@ -361,7 +356,7 @@ static int config_tun_routes(void)
         struct address *address = &g_config.routes[i];
         struct in_addr addr = {.s_addr = address->addr};
         LOG_INF("ip route add %s/%d dev %s", inet_ntoa(addr), address->prefix, g_config.tun_name);
-        if (config_tun_route(iface, nl, portid, address) != 0) {
+        if (config_tun_route(iface, nl, portid, address, i) != 0) {
             mnl_socket_close(nl);
             return 1;
         }
@@ -436,14 +431,95 @@ static int seccomp_restrict(void)
     return ret;
 }
 
+static int drop_cap_net_admin(void)
+{
+    struct __user_cap_header_struct hdr = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0,
+    };
+    struct __user_cap_data_struct data[2] = {{ 0 }, { 0 }};
+
+    if (syscall(SYS_capget, &hdr, data) != 0) {
+        LOGP("capget");
+        return 1;
+    }
+
+    if (!(data[0].permitted & (1u << CAP_NET_ADMIN))) {
+        return 0;
+    }
+
+    uint32_t mask = ~(1u << CAP_NET_ADMIN);
+    data[0].effective &= mask;
+    data[0].permitted &= mask;
+    data[0].inheritable &= mask;
+
+    if (syscall(SYS_capset, &hdr, data) != 0) {
+        LOGP("capset");
+        return 1;
+    }
+
+    LOG_INF("cap_net_admin dropped");
+    return 0;
+}
+
+static int do_privdrop(void)
+{
+    if (g_config.privdrop[0] == '\0') {
+        return 0;
+    }
+
+    char buf[128];
+    strncpy(buf, g_config.privdrop, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *colon = strchr(buf, ':');
+    if (colon == NULL) {
+        LOG_ERR("privdrop: invalid format, expected \"group:user\"");
+        return 1;
+    }
+    *colon = '\0';
+    const char *group_name = buf;
+    const char *user_name = colon + 1;
+
+    struct group *grp = getgrnam(group_name);
+    if (grp == NULL) {
+        LOG_ERR("privdrop: group \"%s\" not found", group_name);
+        return 1;
+    }
+    gid_t gid = grp->gr_gid;
+
+    struct passwd *pw = getpwnam(user_name);
+    if (pw == NULL) {
+        LOG_ERR("privdrop: user \"%s\" not found", user_name);
+        return 1;
+    }
+    uid_t uid = pw->pw_uid;
+
+    if (setgroups(1, &gid) != 0) {
+        LOGP("setgroups");
+        return 1;
+    }
+    if (setgid(gid) != 0) {
+        LOGP("setgid");
+        return 1;
+    }
+    if (setuid(uid) != 0) {
+        LOGP("setuid");
+        return 1;
+    }
+
+    LOG_INF("dropped privileges to %s:%s (%d:%d)", user_name, group_name, uid, gid);
+    return 0;
+}
+
 static void show_conn_info(WOLFSSL *ssl)
 {
     LOG_INF("established %s %s %s", wolfSSL_get_version(ssl), wolfSSL_get_curve_name(ssl),
             wolfSSL_get_cipher(ssl));
 }
 
-static unsigned int psk_server_tls12_cb(WOLFSSL *ssl, const char *identity, unsigned char *key,
-                                        unsigned int key_max_len)
+static unsigned int psk_server_tls13_cb(WOLFSSL *ssl, const char *identity, unsigned char *key,
+                                        unsigned int key_max_len, const char **ciphersuite)
 {
     (void)ssl;
 
@@ -458,26 +534,14 @@ static unsigned int psk_server_tls12_cb(WOLFSSL *ssl, const char *identity, unsi
     }
 
     memcpy(key, g_config.psk, g_config.psk_len);
+    *ciphersuite = g_config.proto->cipher_suite;
 
     return g_config.psk_len;
 }
 
-static unsigned int psk_server_tls13_cb(WOLFSSL *ssl, const char *identity, unsigned char *key,
-                                        unsigned int key_max_len, const char **ciphersuite)
-{
-    (void)ssl;
-
-    unsigned int ret = psk_server_tls12_cb(ssl, identity, key, key_max_len);
-    if (ret != 0) {
-        *ciphersuite = g_config.proto->name;
-    }
-
-    return ret;
-}
-
-static unsigned int psk_client_tls12_cb(WOLFSSL *ssl, const char *hint, char *identity,
+static unsigned int psk_client_tls13_cb(WOLFSSL *ssl, const char *hint, char *identity,
                                         unsigned int id_max_len, unsigned char *key,
-                                        unsigned int key_max_len)
+                                        unsigned int key_max_len, const char **ciphersuite)
 {
     (void)ssl;
     (void)hint;
@@ -494,23 +558,9 @@ static unsigned int psk_client_tls12_cb(WOLFSSL *ssl, const char *hint, char *id
 
     strncpy(identity, client_id, id_max_len);
     memcpy(key, g_config.psk, g_config.psk_len);
+    *ciphersuite = g_config.proto->cipher_suite;
 
     return g_config.psk_len;
-}
-
-static unsigned int psk_client_tls13_cb(WOLFSSL *ssl, const char *hint, char *identity,
-                                        unsigned int id_max_len, unsigned char *key,
-                                        unsigned int key_max_len, const char **ciphersuite)
-{
-    (void)ssl;
-    (void)hint;
-
-    unsigned int ret = psk_client_tls12_cb(ssl, hint, identity, id_max_len, key, key_max_len);
-    if (ret != 0) {
-        *ciphersuite = g_config.proto->name;
-    }
-
-    return ret;
 }
 
 static void dtls_server(void)
@@ -521,26 +571,15 @@ static void dtls_server(void)
         LOG_WRN("using empty psk");
     }
 
-    WOLFSSL_METHOD *method;
-    if (g_config.proto->proto == PROTO_DTLS13) {
-        method = wolfDTLSv1_3_server_method();
-    } else {
-        method = wolfDTLSv1_2_server_method();
-    }
-
-    WOLFSSL_CTX *ssl_ctx = wolfSSL_CTX_new(method);
+    WOLFSSL_CTX *ssl_ctx = wolfSSL_CTX_new(wolfDTLSv1_3_server_method());
     if (ssl_ctx == NULL) {
         LOG_ERR("cannot create wolfSSL context");
         return;
     }
 
-    if (g_config.proto->proto == PROTO_DTLS13) {
-        wolfSSL_CTX_set_psk_server_tls13_callback(ssl_ctx, psk_server_tls13_cb);
-    } else {
-        wolfSSL_CTX_set_psk_server_callback(ssl_ctx, psk_server_tls12_cb);
-    }
+    wolfSSL_CTX_set_psk_server_tls13_callback(ssl_ctx, psk_server_tls13_cb);
 
-    ret = wolfSSL_CTX_set_cipher_list(ssl_ctx, g_config.proto->name);
+    ret = wolfSSL_CTX_set_cipher_list(ssl_ctx, g_config.proto->cipher_suite);
     if (ret != WOLFSSL_SUCCESS) {
         LOG_ERR("cannot set cipher suite");
         wolfSSL_CTX_free(ssl_ctx);
@@ -554,6 +593,14 @@ static void dtls_server(void)
         return;
     }
 
+    int optval = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        LOGP("setsockopt SO_REUSEADDR");
+        close(sockfd);
+        wolfSSL_CTX_free(ssl_ctx);
+        return;
+    }
+
     ret = bind(sockfd, (struct sockaddr *)&g_config.endpoint_address, sizeof(struct sockaddr_in));
     if (ret < 0) {
         LOGP("bind");
@@ -563,11 +610,12 @@ static void dtls_server(void)
     }
 
     if (seccomp_restrict() != 0) {
-        LOG_ERR("cannot restrict myself using seccomp");
+        LOG_ERR("cannot apply seccomp restrictions");
         close(sockfd);
         wolfSSL_CTX_free(ssl_ctx);
         return;
     }
+    LOG_INF("seccomp restrictions applied");
 
     g_ctx.sockfd = sockfd;
     g_ctx.running = true;
@@ -625,6 +673,9 @@ static void dtls_server(void)
         wolfSSL_free(ssl);
     }
 
+    explicit_bzero(g_config.psk, sizeof(g_config.psk));
+    g_config.psk_len = 0;
+
     close(sockfd);
     wolfSSL_CTX_free(ssl_ctx);
     wolfSSL_Cleanup();
@@ -634,26 +685,15 @@ static void dtls_client(void)
 {
     int ret;
 
-    WOLFSSL_METHOD *method;
-    if (g_config.proto->proto == PROTO_DTLS13) {
-        method = wolfDTLSv1_3_client_method();
-    } else {
-        method = wolfDTLSv1_2_client_method();
-    }
-
-    WOLFSSL_CTX *ssl_ctx = wolfSSL_CTX_new(method);
+    WOLFSSL_CTX *ssl_ctx = wolfSSL_CTX_new(wolfDTLSv1_3_client_method());
     if (ssl_ctx == NULL) {
         LOG_ERR("cannot create wolfSSL context");
         return;
     }
 
-    if (g_config.proto->proto == PROTO_DTLS13) {
-        wolfSSL_CTX_set_psk_client_tls13_callback(ssl_ctx, psk_client_tls13_cb);
-    } else {
-        wolfSSL_CTX_set_psk_client_callback(ssl_ctx, psk_client_tls12_cb);
-    }
+    wolfSSL_CTX_set_psk_client_tls13_callback(ssl_ctx, psk_client_tls13_cb);
 
-    ret = wolfSSL_CTX_set_cipher_list(ssl_ctx, g_config.proto->name);
+    ret = wolfSSL_CTX_set_cipher_list(ssl_ctx, g_config.proto->cipher_suite);
     if (ret != WOLFSSL_SUCCESS) {
         LOG_ERR("cannot set cipher suite");
         wolfSSL_CTX_free(ssl_ctx);
@@ -711,6 +751,9 @@ static void dtls_client(void)
 
     show_conn_info(ssl);
 
+    explicit_bzero(g_config.psk, sizeof(g_config.psk));
+    g_config.psk_len = 0;
+
     g_ctx.sockfd = sockfd;
     g_ctx.ssl = ssl;
     wolfSSL_dtls_set_using_nonblock(ssl, 1);
@@ -728,131 +771,6 @@ static void dtls_client(void)
     wolfSSL_free(ssl);
     wolfSSL_CTX_free(ssl_ctx);
     wolfSSL_Cleanup();
-}
-
-static void udp_server(void)
-{
-    int ret;
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        LOGP("socket");
-        return;
-    }
-    g_ctx.sockfd = sockfd;
-
-    ret = bind(sockfd, (struct sockaddr *)&g_config.endpoint_address, sizeof(struct sockaddr_in));
-    if (ret < 0) {
-        LOGP("bind");
-        close(sockfd);
-        return;
-    }
-
-    if (seccomp_restrict() != 0) {
-        LOG_ERR("cannot restrict myself using seccomp");
-        close(sockfd);
-        return;
-    }
-
-    int flags = fcntl(sockfd, F_GETFL);
-
-    char tmp[sizeof(udp_hello)];
-    g_ctx.running = true;
-    while (g_ctx.running) {
-        LOG_INF("listening");
-
-        fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
-
-        ret = recvfrom(sockfd, tmp, sizeof(tmp), 0, (struct sockaddr *)&client_addr, &client_len);
-        if (ret < 0) {
-            if (errno != EINTR) {
-                LOGP("recvfrom");
-            }
-            break;
-        }
-
-        LOG_INF("incoming %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
-
-        if (ret != sizeof(tmp) || strncmp(tmp, udp_hello, sizeof(tmp)) != 0) {
-            continue;
-        }
-
-        ret = sendto(g_ctx.sockfd, udp_hello, sizeof(udp_hello), 0, (struct sockaddr *)&client_addr, sizeof(struct sockaddr_in));
-        if (ret < 0) {
-            LOGP("sendto");
-            break;
-        }
-
-        LOG_INF("established");
-
-        fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-
-        process_udp(&client_addr);
-    }
-
-    close(sockfd);
-}
-
-static void udp_client(void)
-{
-    int ret;
-    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        LOGP("socket");
-        return;
-    }
-
-    ret = connect(sockfd, (struct sockaddr *)&g_config.endpoint_address, sizeof(struct sockaddr_in));
-    if (ret < 0) {
-        LOGP("connect");
-        close(sockfd);
-        return;
-    }
-
-    if (write(sockfd, udp_hello, sizeof(udp_hello)) < 0) {
-        LOGP("write");
-        close(sockfd);
-        return;
-    }
-
-    struct timeval tv = {3, 0};
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char tmp[sizeof(udp_hello)];
-    ret = recv(sockfd, tmp, sizeof(tmp), 0);
-    if (ret < 0) {
-        LOGP("recv");
-        close(sockfd);
-        return;
-    }
-
-    if (strncmp(tmp, udp_hello, sizeof(tmp)) != 0) {
-        LOG_ERR("wrong ack");
-        close(sockfd);
-        return;
-    }
-
-    LOG_INF("established");
-
-    if (seccomp_restrict() != 0) {
-        LOG_ERR("cannot restrict myself using seccomp");
-        close(sockfd);
-        return;
-    }
-
-    int flags = fcntl(sockfd, F_GETFL);
-    fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-
-    g_ctx.sockfd = sockfd;
-    g_ctx.running = true;
-
-    process_udp(&g_config.endpoint_address);
-
-    fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
-
-    close(sockfd);
 }
 
 static void signal_handler(int signum)
@@ -889,10 +807,17 @@ static int set_signal_action(void)
     return 0;
 }
 
+static int64_t now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 static void last_received_update(void)
 {
     if (g_config.timeout != 0) {
-        clock_gettime(CLOCK_REALTIME, &g_ctx.last_received);
+        clock_gettime(CLOCK_MONOTONIC, &g_ctx.last_received);
     }
 }
 
@@ -904,9 +829,8 @@ static bool last_received_timeout(void)
 
     const int ns = 1000000000;
     struct timespec now;
-    // TODO CLOCK_MONOTONIC
-    clock_gettime(CLOCK_REALTIME, &now);
-    time_t elapsed_ns = (now.tv_sec - g_ctx.last_received.tv_sec) * ns
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t elapsed_ns = (now.tv_sec - g_ctx.last_received.tv_sec) * ns
         + now.tv_nsec - g_ctx.last_received.tv_nsec;
 
     return elapsed_ns > g_config.timeout * ns;
@@ -925,6 +849,7 @@ static void process_dtls(void)
 
     last_received_update();
     bool check_keys_updated = false;
+    int64_t dtls_deadline_ms = -1;
 
     while (g_ctx.running) {
         if (check_keys_updated) {
@@ -933,9 +858,11 @@ static void process_dtls(void)
             if (ret != 0) {
                 LOG_ERR("cannot check key update response");
                 check_keys_updated = false;
+                dtls_deadline_ms = -1;
             } else if (required == 0) {
                 LOG_INF("keys updated");
                 check_keys_updated = false;
+                dtls_deadline_ms = -1;
             }
         }
 
@@ -947,10 +874,20 @@ static void process_dtls(void)
             } else {
                 LOG_INF("keys update requested");
                 check_keys_updated = true;
+                int tmo = wolfSSL_dtls_get_current_timeout(g_ctx.ssl);
+                dtls_deadline_ms = now_ms() + (tmo > 0 ? tmo : 1) * 1000LL;
             }
         }
 
-        ret = poll(pollfds, 2, POLL_TIMEOUT_MS);
+        int timeout_ms = POLL_TIMEOUT_MS;
+        if (dtls_deadline_ms >= 0) {
+            int64_t remaining_ms = dtls_deadline_ms - now_ms();
+            if (remaining_ms < timeout_ms) {
+                timeout_ms = (int)(remaining_ms > 0 ? remaining_ms : 0);
+            }
+        }
+
+        ret = poll(pollfds, 2, timeout_ms);
         if (ret < 0) {
             if (errno == EINTR) {
                 /* a signal was caught */
@@ -959,6 +896,19 @@ static void process_dtls(void)
             LOGP("poll");
             break;
         }
+
+        if (dtls_deadline_ms >= 0 && now_ms() >= dtls_deadline_ms) {
+            int tmo_ret = wolfSSL_dtls_got_timeout(g_ctx.ssl);
+            if (tmo_ret != WOLFSSL_SUCCESS) {
+                int err = wolfSSL_get_error(g_ctx.ssl, tmo_ret);
+                LOG_ERR("dtls key update retransmit failed %d: %s", err,
+                        wolfSSL_ERR_error_string(err, NULL));
+                break;
+            }
+            int tmo = wolfSSL_dtls_get_current_timeout(g_ctx.ssl);
+            dtls_deadline_ms = now_ms() + (tmo > 0 ? tmo : 1) * 1000LL;
+        }
+
         if (ret == 0) {
             if (last_received_timeout()) {
                 LOG_INF("disconnected on timeout");
@@ -1029,102 +979,6 @@ ingress:
     }
 }
 
-static void process_udp(struct sockaddr_in *peer)
-{
-    int ret;
-    uint8_t buf[TUNNEL_MAX_MTU];
-    struct sockaddr_in from;
-    socklen_t from_len = sizeof(struct sockaddr_in);
-
-    struct pollfd pollfds[2];
-    pollfds[0].fd = g_ctx.sockfd;
-    pollfds[0].events = POLLIN;
-    pollfds[1].fd = g_ctx.tunfd;
-    pollfds[1].events = POLLIN;
-
-    g_ctx.running = true;
-    last_received_update();
-
-    while (g_ctx.running) {
-        ret = poll(pollfds, 2, POLL_TIMEOUT_MS);
-        if (ret < 0) {
-            if (errno == EINTR) {
-                /* a signal was caught */
-                continue;
-            }
-            LOGP("poll");
-            break;
-        }
-        if (ret == 0) {
-            if (last_received_timeout()) {
-                LOG_INF("disconnected on timeout");
-                break;
-            }
-            continue;
-        }
-
-        if (pollfds[0].revents & POLLIN) {
-            last_received_update();
-            ret = recvfrom(g_ctx.sockfd, buf, g_config.mtu, MSG_DONTWAIT, (struct sockaddr *)&from, &from_len);
-            if (ret == 0) {
-                LOG_INF("disconnected");
-                break;
-            }
-            if (ret < 0) {
-                LOGP("recvfrom");
-                break;
-            }
-            if (from.sin_addr.s_addr != peer->sin_addr.s_addr || from.sin_port != peer->sin_port) {
-                char tmp[32];
-                if (inet_ntop(AF_INET, &from.sin_addr, tmp, sizeof(tmp)) != NULL) {
-                    LOG_WRN("recv from %s", tmp);
-                } else {
-                    LOG_WRN("recv from unknown");
-                }
-                continue;
-            }
-            size_t size = ret;
-            ret = write(g_ctx.tunfd, buf, size);
-            if (ret == 0) {
-                LOG_INF("exiting");
-                break;
-            }
-            if (ret < 0) {
-                LOGP("write");
-                break;
-            }
-            if ((size_t)ret != size) {
-                LOG_WRN("partial write");
-            }
-        }
-
-        if (pollfds[1].revents & POLLIN) {
-            ret = read(g_ctx.tunfd, buf, g_config.mtu);
-            if (ret == 0) {
-                LOG_INF("disconnected");
-                break;
-            }
-            if (ret < 0) {
-                LOGP("read");
-                break;
-            }
-            size_t size = ret;
-            ret = sendto(g_ctx.sockfd, buf, size, 0, (struct sockaddr *)peer, sizeof(struct sockaddr_in));
-            if (ret == 0) {
-                LOG_INF("exiting");
-                break;
-            }
-            if (ret < 0) {
-                LOGP("sendto");
-                break;
-            }
-            if ((size_t)ret != size) {
-                LOG_WRN("partial write");
-            }
-        }
-    }
-}
-
 static int conf_load_endpoint(toml_datum_t *conf)
 {
     toml_datum_t endpoint = toml_get(*conf, "endpoint");
@@ -1137,18 +991,24 @@ static int conf_load_endpoint(toml_datum_t *conf)
         goto fail;
     }
 
-    char *port = strchr(endpoint.u.str.ptr, ':');
-    if (!port) {
-        LOG_ERR("cannot parse endpoint %s: valid format is ipv4:port", endpoint.u.str.ptr);
+    char buf[64];
+    if ((size_t)endpoint.u.str.len >= sizeof(buf)) {
+        LOG_ERR("cannot parse endpoint: value too long");
         goto fail;
     }
-    char c = *port;
-    *port = 0;
+    memcpy(buf, endpoint.u.str.ptr, endpoint.u.str.len);
+    buf[endpoint.u.str.len] = '\0';
 
-    int ret = inet_pton(AF_INET, endpoint.u.str.ptr, &g_config.endpoint_address.sin_addr);
-    *port++ = c;
+    char *port = strchr(buf, ':');
+    if (!port) {
+        LOG_ERR("cannot parse endpoint %s: valid format is ipv4:port", buf);
+        goto fail;
+    }
+    *port++ = '\0';
+
+    int ret = inet_pton(AF_INET, buf, &g_config.endpoint_address.sin_addr);
     if (ret != 1) {
-        LOG_ERR("cannot parse endpoint %s: invalid ipv4", endpoint.u.str.ptr);
+        LOG_ERR("cannot parse endpoint %s: invalid ipv4", buf);
         goto fail;
     }
 
@@ -1156,8 +1016,8 @@ static int conf_load_endpoint(toml_datum_t *conf)
     char *endptr;
     uint32_t n = strtoul(port, &endptr, 10);
     if (errno == ERANGE || endptr == port || *endptr != 0 || n > 65535) {
-        LOG_ERR("cannot parse endpoint %s: invalid port", endpoint.u.str.ptr);
-        return 1;
+        LOG_ERR("cannot parse endpoint %s: invalid port", buf);
+        goto fail;
     }
     g_config.endpoint_address.sin_port = htons(n);
     g_config.endpoint_address.sin_family = AF_INET;
@@ -1170,26 +1030,28 @@ fail:
 
 static int parse_address(const char *str, struct address *address)
 {
-    int ret;
-    char *pos = strchr(str, '/');
-    if (!pos) {
+    const char *slash = strchr(str, '/');
+    if (!slash) {
         return 1;
     }
-    char *prefix = pos + 1;
 
     errno = 0;
     char *endptr;
-    uint32_t n = strtoul(prefix, &endptr, 10);
-    if (errno == ERANGE || endptr == prefix || *endptr != 0 || n > 32) {
+    uint32_t n = strtoul(slash + 1, &endptr, 10);
+    if (errno == ERANGE || endptr == slash + 1 || *endptr != '\0' || n > 32) {
         return 1;
     }
     address->prefix = n;
 
-    char c = *pos;
-    *pos = 0;
-    ret = inet_pton(AF_INET, str, &address->addr);
-    *pos = c;
-    if (ret != 1) {
+    char ip[16];
+    size_t ip_len = (size_t)(slash - str);
+    if (ip_len == 0 || ip_len >= sizeof(ip)) {
+        return 1;
+    }
+    memcpy(ip, str, ip_len);
+    ip[ip_len] = '\0';
+
+    if (inet_pton(AF_INET, ip, &address->addr) != 1) {
         return 1;
     }
 
@@ -1356,6 +1218,11 @@ static int config_load(const char *path)
         goto fail;
     }
 
+    if (g_config.mtu + g_config.proto->dtls_overhead > WOLFSSL_MAX_MTU) {
+        LOG_WRN("mtu %zu + dtls overhead %d exceeds network mtu %d",
+                g_config.mtu, g_config.proto->dtls_overhead, WOLFSSL_MAX_MTU);
+    }
+
     if (conf_load_address(&res.toptab) != 0) {
         goto fail;
     }
@@ -1366,14 +1233,9 @@ static int config_load(const char *path)
 
     toml_datum_t psk = toml_get(res.toptab, "psk");
     if (psk.type == TOML_UNKNOWN) {
-        if (g_config.proto->proto == PROTO_DTLS12 || g_config.proto->proto == PROTO_DTLS13) {
-            LOG_ERR("cannot read psk: required for dtls proto");
-            goto fail;
-        }
+        LOG_ERR("cannot read psk");
+        goto fail;
     } else if (psk.type == TOML_STRING) {
-        if (g_config.proto->proto == PROTO_UDP) {
-            LOG_WRN("psk is not used for udp proto");
-        }
         g_config.psk_len = sizeof(g_config.psk);
         int ret = Base64_Decode((const byte *)psk.u.str.ptr, psk.u.str.len, g_config.psk,
                                 &g_config.psk_len);
@@ -1406,6 +1268,25 @@ static int config_load(const char *path)
         goto fail;
     }
 
+    toml_datum_t privdrop = toml_get(res.toptab, "privdrop");
+    if (privdrop.type == TOML_UNKNOWN) {
+        g_config.privdrop[0] = '\0';
+    } else if (privdrop.type == TOML_STRING) {
+        if ((size_t)privdrop.u.str.len >= sizeof(g_config.privdrop)) {
+            LOG_ERR("cannot parse privdrop: value too long");
+            goto fail;
+        }
+        memcpy(g_config.privdrop, privdrop.u.str.ptr, privdrop.u.str.len);
+        g_config.privdrop[privdrop.u.str.len] = '\0';
+        if (strchr(g_config.privdrop, ':') == NULL) {
+            LOG_ERR("cannot parse privdrop: expected \"group:user\" format");
+            goto fail;
+        }
+    } else {
+        LOG_ERR("cannot parse privdrop: must be a string");
+        goto fail;
+    }
+
     toml_free(res);
     return 0;
 
@@ -1434,6 +1315,9 @@ static char *config_print_routes(void)
     }
 
     char *buf = malloc(n * strlen("\"111.111.111.111/11\", ") + 1);
+    if (buf == NULL) {
+        return NULL;
+    }
     char *p = buf;
 
     for (size_t i = 0; i < n; ++i) {
@@ -1455,7 +1339,7 @@ static void config_print(void)
     char *routes_str = config_print_routes();
 
     printf("role = \"%s\"\n", config_get_role_name());
-    printf("proto = \"%s\"\n", g_config.proto->name);
+    printf("proto = \"%s\"\n", g_config.proto->cipher_suite);
     inet_ntop(AF_INET, &g_config.endpoint_address.sin_addr, addr, sizeof(addr));
     printf("endpoint = \"%s:%d\"\n", addr, ntohs(g_config.endpoint_address.sin_port));
     printf("tun = \"%s\"\n", g_config.tun_name);
@@ -1466,6 +1350,9 @@ static void config_print(void)
     printf("psk = \"<hidden>\"\n");
     printf("verbosity = %d\n", g_config.verbosity);
     printf("seccomp = %s\n", g_config.seccomp ? "true" : "false");
+    if (g_config.privdrop[0] != '\0') {
+        printf("privdrop = \"%s\"\n", g_config.privdrop);
+    }
 
     free(routes_str);
 }
@@ -1492,6 +1379,7 @@ static void generate_psk(void)
     }
 
     ret = Base64_Encode(psk, sizeof(psk), out, &out_len);
+    explicit_bzero(psk, sizeof(psk));
     if (ret != 0) {
         LOG_ERR("cannot encode base64: %d", ret);
         return;
@@ -1541,16 +1429,14 @@ int main(int argc, char **argv)
         config_print();
     }
 
-    if (g_config.proto->proto == PROTO_DTLS12 || g_config.proto->proto == PROTO_DTLS13) {
-        ret = wolfSSL_Init();
-        if (ret != WOLFSSL_SUCCESS) {
-            LOG_ERR("cannot initialize wolfSSL");
-            return 1;
-        }
-        if (g_config.verbosity > 1) {
-            wolfSSL_SetLoggingCb(wolfSSL_log_cb);
-            wolfSSL_Debugging_ON();
-        }
+    ret = wolfSSL_Init();
+    if (ret != WOLFSSL_SUCCESS) {
+        LOG_ERR("cannot initialize wolfSSL");
+        return 1;
+    }
+    if (g_config.verbosity > 1) {
+        wolfSSL_SetLoggingCb(wolfSSL_log_cb);
+        wolfSSL_Debugging_ON();
     }
 
     if (set_signal_action() != 0) {
@@ -1566,18 +1452,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (drop_cap_net_admin() != 0) {
+        close(g_ctx.tunfd);
+        return 1;
+    }
+
+    if (do_privdrop() != 0) {
+        close(g_ctx.tunfd);
+        return 1;
+    }
+
     if (g_config.role == ROLE_CLIENT) {
-        if (g_config.proto->proto == PROTO_UDP) {
-            udp_client();
-        } else {
-            dtls_client();
-        }
+        dtls_client();
     } else {
-        if (g_config.proto->proto == PROTO_UDP) {
-            udp_server();
-        } else {
-            dtls_server();
-        }
+        dtls_server();
     }
 
     close(g_ctx.tunfd);

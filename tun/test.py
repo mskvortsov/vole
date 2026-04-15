@@ -123,6 +123,7 @@ endpoint = "127.0.0.1:12345"
 tun = "dtls1"
 address = "10.8.0.1/30"
 psk = "0qhQoLAvfOukhP0NqGVOuQ=="
+privdrop = "nogroup:nobody"
 """
 
 conf_client = """
@@ -132,6 +133,7 @@ endpoint = "127.0.0.1:12345"
 tun = "dtls2"
 address = "10.8.0.2/30"
 psk = "0qhQoLAvfOukhP0NqGVOuQ=="
+privdrop = "nogroup:nobody"
 """
 
 
@@ -170,37 +172,6 @@ def test_connect_disconnect_aes():
     server = spawn(conf_server_aes)
     assert_line(server, "listening")
     client = spawn(conf_client_aes)
-    assert_line(server, "established")
-    assert_line(client, "established")
-    terminate(client)
-    assert_line(server, "disconnected")
-    assert_line(server, "listening")
-    terminate(server)
-
-
-conf_server_dtls12 = """
-role = "server"
-proto = "ecdhe-psk-aes128-cbc-sha256"
-endpoint = "127.0.0.1:12345"
-tun = "dtls1"
-address = "10.8.0.1/30"
-psk = "0qhQoLAvfOukhP0NqGVOuQ=="
-"""
-
-conf_client_dtls12 = """
-role = "client"
-proto = "ecdhe-psk-aes128-cbc-sha256"
-endpoint = "127.0.0.1:12345"
-tun = "dtls2"
-address = "10.8.0.2/30"
-psk = "0qhQoLAvfOukhP0NqGVOuQ=="
-"""
-
-
-def test_connect_disconnect_dtls12():
-    server = spawn(conf_server_dtls12)
-    assert_line(server, "listening")
-    client = spawn(conf_client_dtls12)
     assert_line(server, "established")
     assert_line(client, "established")
     terminate(client)
@@ -305,36 +276,6 @@ def test_server_timeout():
     terminated(client, 1)
 
 
-conf_server_udp = """
-role = "server"
-proto = "udp"
-endpoint = "127.0.0.1:12345"
-tun = "ipou1"
-address = "10.8.0.1/30"
-timeout = 3
-"""
-
-conf_client_udp = """
-role = "client"
-proto = "udp"
-endpoint = "127.0.0.1:12345"
-tun = "ipou2"
-address = "10.8.0.2/30"
-"""
-
-
-def test_connect_disconnect_udp():
-    server = spawn(conf_server_udp)
-    assert_line(server, "listening")
-    client = spawn(conf_client_udp)
-    assert_line(server, "established")
-    assert_line(client, "established")
-    assert_line(server, "disconnected on timeout", 5)
-    assert_line(server, "listening")
-    terminate(client)
-    terminate(server)
-
-
 if len(sys.argv) < 2 or len(sys.argv) > 3:
     print("Usage: python3 test.py <tun-executable-path> [verbose]")
     sys.exit()
@@ -347,12 +288,10 @@ if len(sys.argv) == 3 and sys.argv[2] == "verbose":
 try:
     test_connect_disconnect()
     test_connect_disconnect_aes()
-    test_connect_disconnect_dtls12()
     test_psk_mismatch()
     test_ping()
     test_keys_update()
     test_server_timeout()
-    test_connect_disconnect_udp()
     print("PASSED")
 except:
     killall()

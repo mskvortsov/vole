@@ -6,3 +6,4 @@ mtu = 1380
 address = "10.8.0.2/30"
 psk = "AAAAAAAAAAAAAAAAAAAAAA=="
 verbosity = 0
+privdrop = "nogroup:nobody"
